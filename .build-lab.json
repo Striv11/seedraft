@@ -1,0 +1,1 @@
+{"name": "seedraft", "description": "Raft in Rust tested by a FoundationDB-style deterministic simulator where one u64 seed replays any failure", "language": "Rust", "arc_days": 14}
