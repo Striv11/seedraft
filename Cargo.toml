@@ -1,0 +1,11 @@
+[package]
+name = "seedraft"
+version = "0.1.0"
+edition = "2021"
+description = "Raft consensus tested by a FoundationDB-style deterministic simulator"
+license = "MIT"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
