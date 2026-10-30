@@ -1,0 +1,10 @@
+//! seedraft: a deterministic simulation testing harness (and, in later days, Raft on top of it).
+//!
+//! Everything nondeterministic (time, message delay, loss, reordering) is derived from one
+//! `u64` seed, so any run can be replayed exactly.
+
+pub mod rng;
+pub mod sim;
+
+pub use rng::Rng;
+pub use sim::{Event, NetConfig, NodeId, Sim, TraceEntry};
