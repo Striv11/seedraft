@@ -1,0 +1,10 @@
+# Work log
+
+Newest entries at the bottom. Each entry records what actually changed, what was learned, and what comes next.
+
+## 2026-10-30 — Day 1: simulator core
+- Chose the seeded flagship: Raft + deterministic simulation testing, repo `seedraft`, 14-day plan in PLAN.md.
+- Built `Rng` (SplitMix64, checked against the reference vector), and `Sim<M>`: virtual clock, `(time, seq)` ordered event queue, timers, network with delay/reorder/drop/duplicate, partitions that also kill in-flight messages, a trace and an FNV trace hash.
+- Tests prove same seed => identical trace hash, deliveries and end time (including with a mid-run partition); different seeds diverge; faults really occur.
+- Learned: reordering falls out of random delays plus an explicit extra-delay knob; tie-breaking by insertion sequence is what keeps equal-time events deterministic.
+- Next (Day 2): simulated disk with fsync loss, torn writes, crash-restart.
