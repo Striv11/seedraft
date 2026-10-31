@@ -4,6 +4,7 @@
 //! source of randomness is the seeded [`Rng`]. Events are ordered by `(time, sequence)`, so
 //! ties are broken deterministically in insertion order.
 
+use crate::disk::{Disk, DiskConfig};
 use crate::rng::Rng;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -81,11 +82,28 @@ pub enum TraceEntry {
     Heal {
         at: u64,
     },
+    Crash {
+        at: u64,
+        node: NodeId,
+        /// Unsynced disk bytes that survived (torn write).
+        torn_bytes: usize,
+    },
+    Restart {
+        at: u64,
+        node: NodeId,
+    },
+    Fsync {
+        at: u64,
+        node: NodeId,
+        ok: bool,
+    },
 }
 
 struct Queued<M> {
     at: u64,
     seq: u64,
+    /// For timers: the node's incarnation when it was set; stale timers die on crash.
+    epoch: u64,
     ev: Event<M>,
 }
 
@@ -114,6 +132,10 @@ pub struct Sim<M> {
     net: NetConfig,
     /// Partition group of each node; nodes in different groups cannot talk.
     group: Vec<usize>,
+    up: Vec<bool>,
+    epoch: Vec<u64>,
+    disks: Vec<Disk>,
+    disk_cfg: DiskConfig,
     trace: Vec<TraceEntry>,
 }
 
@@ -127,6 +149,10 @@ impl<M: Clone + Debug> Sim<M> {
             rng: Rng::new(seed),
             net,
             group: vec![0; nodes],
+            up: vec![true; nodes],
+            epoch: vec![0; nodes],
+            disks: vec![Disk::new(); nodes],
+            disk_cfg: DiskConfig::default(),
             trace: Vec::new(),
         }
     }
@@ -164,11 +190,65 @@ impl<M: Clone + Debug> Sim<M> {
 
     fn push(&mut self, at: u64, ev: Event<M>) {
         self.seq += 1;
+        let epoch = match &ev {
+            Event::Timer { node, .. } => self.epoch[*node],
+            Event::Deliver { .. } => 0,
+        };
         self.queue.push(Reverse(Queued {
             at,
             seq: self.seq,
+            epoch,
             ev,
         }));
+    }
+
+    pub fn set_disk_config(&mut self, cfg: DiskConfig) {
+        self.disk_cfg = cfg;
+    }
+
+    pub fn is_up(&self, node: NodeId) -> bool {
+        self.up[node]
+    }
+
+    /// Direct access to a node's disk (only meaningful while the node is up).
+    pub fn disk(&mut self, node: NodeId) -> &mut Disk {
+        &mut self.disks[node]
+    }
+
+    /// Fsync a node's disk through the fault model; the outcome is traced.
+    pub fn fsync(&mut self, node: NodeId) -> bool {
+        let ok = self.disks[node].fsync(&self.disk_cfg, &mut self.rng);
+        self.trace.push(TraceEntry::Fsync {
+            at: self.now,
+            node,
+            ok,
+        });
+        ok
+    }
+
+    /// Crash a node: it stops receiving messages and timers, its pending timers die, and its
+    /// disk loses (or tears) unsynced writes. No-op if already down.
+    pub fn crash(&mut self, node: NodeId) {
+        if !self.up[node] {
+            return;
+        }
+        self.up[node] = false;
+        self.epoch[node] += 1;
+        let torn_bytes = self.disks[node].crash(&self.disk_cfg, &mut self.rng);
+        self.trace.push(TraceEntry::Crash {
+            at: self.now,
+            node,
+            torn_bytes,
+        });
+    }
+
+    /// Bring a crashed node back. Volatile state is the driver's job to rebuild from the disk.
+    pub fn restart(&mut self, node: NodeId) {
+        if self.up[node] {
+            return;
+        }
+        self.up[node] = true;
+        self.trace.push(TraceEntry::Restart { at: self.now, node });
     }
 
     /// Schedule a timer `after` ticks from now.
@@ -209,6 +289,15 @@ impl<M: Clone + Debug> Sim<M> {
             to,
             msg: format!("{msg:?}"),
         });
+        if !self.up[from] {
+            self.trace.push(TraceEntry::Drop {
+                at,
+                from,
+                to,
+                why: "sender-down",
+            });
+            return;
+        }
         if !self.connected(from, to) {
             self.trace.push(TraceEntry::Drop {
                 at,
@@ -265,6 +354,15 @@ impl<M: Clone + Debug> Sim<M> {
                         });
                         continue;
                     }
+                    if !self.up[to] {
+                        self.trace.push(TraceEntry::Drop {
+                            at: self.now,
+                            from,
+                            to,
+                            why: "receiver-down",
+                        });
+                        continue;
+                    }
                     self.trace.push(TraceEntry::Deliver {
                         at: self.now,
                         from,
@@ -274,6 +372,9 @@ impl<M: Clone + Debug> Sim<M> {
                     return Some(Event::Deliver { from, to, msg });
                 }
                 Event::Timer { node, id } => {
+                    if !self.up[node] || q.epoch != self.epoch[node] {
+                        continue; // timer belonged to a previous incarnation
+                    }
                     self.trace.push(TraceEntry::Timer {
                         at: self.now,
                         node,

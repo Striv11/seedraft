@@ -20,7 +20,7 @@ Deterministic simulation testing (FoundationDB, TigerBeetle) fixes this by makin
           | queue    |  send/timer |  machines)      |
           | rng      |             +--------+--------+
           | network  |                      | applies
-          | disk*    |             +--------v--------+
+          | disk     |             +--------v--------+
           +----+-----+             | KV + sessions*  |
                | trace             +--------+--------+
                v                            | history
@@ -32,7 +32,7 @@ Deterministic simulation testing (FoundationDB, TigerBeetle) fixes this by makin
 ```
 Key invariant: the simulator is single-threaded, never reads the wall clock, and all randomness comes from one seeded generator; events are ordered by `(time, insertion sequence)`.
 
-Implemented so far (Day 1): `rng` (SplitMix64), `sim` (virtual clock, event queue, network with delay, reorder, drop, duplicate, partition and heal, trace and trace hash).
+Implemented so far: `rng` (SplitMix64), `sim` (virtual clock, event queue, network with delay, reorder, drop, duplicate, partition and heal, trace and trace hash), and (Day 2) `disk` (append-only record log with fsync, lost fsyncs, torn writes) plus node crash/restart in the sim (down nodes get no messages or timers; timers from before a crash never fire).
 
 ## Setup
 Requires a stable Rust toolchain.
@@ -47,12 +47,13 @@ Planned. Target: `seedraft sweep --seeds 0..5000` prints the first failing seed 
 ## Design decisions & trade-offs
 - Own SplitMix64 instead of the `rand` crate: zero dependencies and a stream that can never change under us, which matters for seed replay.
 - Messages are formatted to strings in the trace so traces are comparable and printable; costs speed, simplifies debugging.
+- Disk records are framed with length + checksum; crash keeps a random prefix of unsynced bytes, so recovery must tolerate a torn tail (`Disk::repair`).
 - Partitions also drop messages already in flight, modelling a cable cut rather than a polite filter.
 
 ## Roadmap
 See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Day 1: simulator core
-- [ ] Disk faults and crash-restart
+- [x] Disk faults and crash-restart
 - [ ] Raft election, replication, persistence
 - [ ] KV with sessions, linearizability checker
 - [ ] CLI sweep, snapshots, joint consensus, minimizer, timeline
