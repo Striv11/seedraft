@@ -3,8 +3,10 @@
 //! Everything nondeterministic (time, message delay, loss, reordering) is derived from one
 //! `u64` seed, so any run can be replayed exactly.
 
+pub mod disk;
 pub mod rng;
 pub mod sim;
 
+pub use disk::{Disk, DiskConfig};
 pub use rng::Rng;
 pub use sim::{Event, NetConfig, NodeId, Sim, TraceEntry};
