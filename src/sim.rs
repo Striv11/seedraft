@@ -161,6 +161,11 @@ impl<M: Clone + Debug> Sim<M> {
         self.now
     }
 
+    /// Time of the next queued event, if any (it may still turn out to be discarded).
+    pub fn peek_time(&self) -> Option<u64> {
+        self.queue.peek().map(|Reverse(q)| q.at)
+    }
+
     pub fn nodes(&self) -> usize {
         self.group.len()
     }

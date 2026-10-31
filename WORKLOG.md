@@ -15,3 +15,11 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Tests: unsynced loss, lost fsync, torn write is always a record prefix (200 seeds), repair, same-seed same disk state, and a crash-heavy sim workload that is trace-hash identical per seed.
 - Learned: a per-node epoch on timers is simpler than purging the event queue on crash.
 - Next (Day 3): Raft leader election on top of the sim; at most one leader per term over 1000 seeds.
+
+## 2026-10-31 — Day 3: Raft leader election
+- Added `raft.rs`: pure `Node` state machine (RequestVote, heartbeats, term handling, randomized election timeouts) returning ordered `Out` actions, and `Cluster` that runs it in the sim, persisting `(term, votedFor)` with fsync before dependent sends and recovering from disk on restart.
+- Tests (`tests/election.rs`, 1000 seeds each): leader within 1500 ticks on a healthy net; re-election after leader crash with a higher term; at most one leader per term under drops/dup/reorder plus random crashes and partitions; term/vote survive restart; same seed => same history.
+- Mutation check: making every node grant every vote immediately produces two leaders in one term, so the safety test has teeth.
+- Learned: stale timers are handled with a generation number in the timer id, same idea as the sim's crash epochs. Leader-per-term must be recorded on the role transition, not after actions run.
+- Caveat: persistence assumes fsync works; with fsync loss enabled votes can be forgotten (Day 5 addresses recovery under disk faults).
+- Next (Day 4): log replication and commit, log matching invariant over 1000 seeds.

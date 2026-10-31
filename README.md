@@ -34,6 +34,8 @@ Key invariant: the simulator is single-threaded, never reads the wall clock, and
 
 Implemented so far: `rng` (SplitMix64), `sim` (virtual clock, event queue, network with delay, reorder, drop, duplicate, partition and heal, trace and trace hash), and (Day 2) `disk` (append-only record log with fsync, lost fsyncs, torn writes) plus node crash/restart in the sim (down nodes get no messages or timers; timers from before a crash never fire).
 
+Day 3 adds `raft`: `Node` is a pure state machine (input -> list of `Out` actions) and `Cluster` runs nodes in the sim, fsyncing `currentTerm`/`votedFor` before any dependent message is sent. The cluster records every leader per term, which the tests use to check election safety.
+
 ## Setup
 Requires a stable Rust toolchain.
 ```
@@ -54,7 +56,8 @@ Planned. Target: `seedraft sweep --seeds 0..5000` prints the first failing seed 
 See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Day 1: simulator core
 - [x] Disk faults and crash-restart
-- [ ] Raft election, replication, persistence
+- [x] Raft leader election (term/vote persisted)
+- [ ] Raft log replication, crash recovery
 - [ ] KV with sessions, linearizability checker
 - [ ] CLI sweep, snapshots, joint consensus, minimizer, timeline
 
