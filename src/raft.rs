@@ -1,7 +1,9 @@
 //! Raft leader election (Day 3) and log replication with commit (Day 4).
 //!
-//! The log lives in memory only; making it durable across crashes is Day 5's job, so tests
-//! that crash nodes must not yet claim committed entries survive.
+//! Day 5: `currentTerm`, `votedFor` and the log are write-ahead logged to the node's simulated
+//! disk (records: hard state, appended entry, truncate-to-length) and fsynced *before* any
+//! message that depends on them is sent, so a restarted node replays its disk and loses no
+//! acknowledged entry (assuming fsync is honest; a lying drive voids every WAL protocol).
 //!
 //! [`Node`] is a pure state machine: handlers take an input and return a list of [`Out`]
 //! actions, and never touch the clock, network or disk themselves. [`Cluster`] wires nodes to
@@ -82,16 +84,24 @@ impl Default for RaftConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Out {
     Send(NodeId, Msg),
-    /// Make `(term, voted_for)` durable before executing later actions.
+    /// Make hard state and/or log changes durable (append + fsync) before later actions.
     Persist {
-        term: Term,
-        voted_for: Option<NodeId>,
+        hard: Option<(Term, Option<NodeId>)>,
+        log: Vec<LogOp>,
     },
     /// Arm a timer; `after` is a fixed delay for heartbeats, or a random election timeout.
     SetTimer {
         id: u64,
         after: TimerKind,
     },
+}
+
+/// A mutation of the durable log, replayed in order on recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogOp {
+    Append(Entry),
+    /// Keep only the first `n` entries.
+    TruncateTo(Index),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +119,8 @@ pub struct Node {
     role: Role,
     votes: BTreeSet<NodeId>,
     log: Vec<Entry>,
+    /// Log mutations not yet handed to the environment for persisting.
+    wal: Vec<LogOp>,
     commit: Index,
     /// Leader state, indexed by peer id.
     next: Vec<Index>,
@@ -123,7 +135,13 @@ fn timer_id(gen: u64, kind: TimerKind) -> u64 {
 
 impl Node {
     /// A node (re)starting with the state recovered from disk. Returns its first actions.
-    pub fn new(id: NodeId, n: usize, term: Term, voted_for: Option<NodeId>) -> (Self, Vec<Out>) {
+    pub fn new(
+        id: NodeId,
+        n: usize,
+        term: Term,
+        voted_for: Option<NodeId>,
+        log: Vec<Entry>,
+    ) -> (Self, Vec<Out>) {
         let mut node = Self {
             id,
             n,
@@ -131,7 +149,8 @@ impl Node {
             voted_for,
             role: Role::Follower,
             votes: BTreeSet::new(),
-            log: Vec::new(),
+            log,
+            wal: Vec::new(),
             commit: 0,
             next: vec![1; n],
             matched: vec![0; n],
@@ -165,6 +184,29 @@ impl Node {
             0
         } else {
             self.log[i as usize - 1].term
+        }
+    }
+
+    fn push_entry(&mut self, e: Entry) {
+        self.log.push(e);
+        self.wal.push(LogOp::Append(e));
+    }
+
+    fn truncate_to(&mut self, len: usize) {
+        self.log.truncate(len);
+        self.wal.push(LogOp::TruncateTo(len as Index));
+    }
+
+    /// Hand pending durable changes to the environment, to be executed before any send.
+    fn flush_persist(&mut self, hard_changed: bool, outs: &mut Vec<Out>) {
+        if hard_changed || !self.wal.is_empty() {
+            outs.insert(
+                0,
+                Out::Persist {
+                    hard: hard_changed.then_some((self.term, self.voted_for)),
+                    log: std::mem::take(&mut self.wal),
+                },
+            );
         }
     }
 
@@ -202,15 +244,7 @@ impl Node {
         let before = (self.term, self.voted_for);
         let mut outs = Vec::new();
         f(self, &mut outs);
-        if (self.term, self.voted_for) != before {
-            outs.insert(
-                0,
-                Out::Persist {
-                    term: self.term,
-                    voted_for: self.voted_for,
-                },
-            );
-        }
+        self.flush_persist((self.term, self.voted_for) != before, &mut outs);
         outs
     }
 
@@ -249,7 +283,7 @@ impl Node {
             let next = self.last_index() + 1;
             self.next = vec![next; self.n];
             self.matched = vec![0; self.n];
-            self.log.push(Entry {
+            self.push_entry(Entry {
                 term: self.term,
                 cmd: None,
             });
@@ -264,13 +298,14 @@ impl Node {
         if self.role != Role::Leader {
             return None;
         }
-        self.log.push(Entry {
+        self.push_entry(Entry {
             term: self.term,
             cmd: Some(cmd),
         });
         let mut outs = Vec::new();
         self.advance_commit();
         self.replicate_all(&mut outs);
+        self.flush_persist(false, &mut outs);
         Some((self.last_index(), outs))
     }
 
@@ -371,9 +406,9 @@ impl Node {
                                 if s.term_at(at) == e.term {
                                     continue; // already have it (duplicate or reordered)
                                 }
-                                s.log.truncate(at as usize - 1);
+                                s.truncate_to(at as usize - 1);
                             }
-                            s.log.push(e);
+                            s.push_entry(e);
                         }
                         // `at` is the last index this message vouches for.
                         s.commit = s.commit.max(leader_commit.min(at));
@@ -408,16 +443,74 @@ impl Node {
     }
 }
 
-fn encode(term: Term, voted_for: Option<NodeId>) -> Vec<u8> {
-    let mut b = term.to_le_bytes().to_vec();
+const REC_HARD: u8 = 0;
+const REC_APPEND: u8 = 1;
+const REC_TRUNC: u8 = 2;
+
+fn encode_hard(term: Term, voted_for: Option<NodeId>) -> Vec<u8> {
+    let mut b = vec![REC_HARD];
+    b.extend_from_slice(&term.to_le_bytes());
     b.extend_from_slice(&voted_for.map_or(0, |v| v as u64 + 1).to_le_bytes());
     b
 }
 
-fn decode(rec: &[u8]) -> Option<(Term, Option<NodeId>)> {
-    let term = Term::from_le_bytes(rec.get(..8)?.try_into().ok()?);
-    let v = u64::from_le_bytes(rec.get(8..16)?.try_into().ok()?);
-    Some((term, v.checked_sub(1).map(|v| v as usize)))
+fn encode_op(op: LogOp) -> Vec<u8> {
+    match op {
+        LogOp::Append(e) => {
+            let mut b = vec![REC_APPEND];
+            b.extend_from_slice(&e.term.to_le_bytes());
+            b.extend_from_slice(&e.cmd.unwrap_or(0).to_le_bytes());
+            b.push(u8::from(e.cmd.is_some()));
+            b
+        }
+        LogOp::TruncateTo(n) => {
+            let mut b = vec![REC_TRUNC];
+            b.extend_from_slice(&n.to_le_bytes());
+            b
+        }
+    }
+}
+
+fn u64_at(rec: &[u8], at: usize) -> Option<u64> {
+    Some(u64::from_le_bytes(rec.get(at..at + 8)?.try_into().ok()?))
+}
+
+/// Everything a node recovers from its disk.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Recovered {
+    pub term: Term,
+    pub voted_for: Option<NodeId>,
+    pub log: Vec<Entry>,
+}
+
+/// Replay intact disk records in order. Unknown or malformed records are skipped.
+pub fn recover(records: &[Vec<u8>]) -> Recovered {
+    let mut r = Recovered::default();
+    for rec in records {
+        match rec.first() {
+            Some(&REC_HARD) => {
+                if let (Some(t), Some(v)) = (u64_at(rec, 1), u64_at(rec, 9)) {
+                    r.term = t;
+                    r.voted_for = v.checked_sub(1).map(|v| v as usize);
+                }
+            }
+            Some(&REC_APPEND) => {
+                if let (Some(term), Some(c), Some(&has)) = (u64_at(rec, 1), u64_at(rec, 9), rec.get(17)) {
+                    r.log.push(Entry {
+                        term,
+                        cmd: (has == 1).then_some(c),
+                    });
+                }
+            }
+            Some(&REC_TRUNC) => {
+                if let Some(n) = u64_at(rec, 1) {
+                    r.log.truncate(n as usize);
+                }
+            }
+            _ => {}
+        }
+    }
+    r
 }
 
 /// Raft nodes running inside a [`Sim`].
@@ -442,7 +535,7 @@ impl Cluster {
             violations: Vec::new(),
         };
         for id in 0..n {
-            let (node, outs) = Node::new(id, n, 0, None);
+            let (node, outs) = Node::new(id, n, 0, None, Vec::new());
             c.nodes.push(node);
             c.exec(id, outs);
         }
@@ -549,15 +642,8 @@ impl Cluster {
         }
         self.sim.restart(id);
         self.sim.disk(id).repair();
-        let (term, vote) = self
-            .sim
-            .disk(id)
-            .read_records()
-            .iter()
-            .rev()
-            .find_map(|r| decode(r))
-            .unwrap_or((0, None));
-        let (node, outs) = Node::new(id, self.nodes.len(), term, vote);
+        let rec = recover(&self.sim.disk(id).read_records());
+        let (node, outs) = Node::new(id, self.nodes.len(), rec.term, rec.voted_for, rec.log);
         self.nodes[id] = node;
         self.exec(id, outs);
     }
@@ -565,8 +651,13 @@ impl Cluster {
     fn exec(&mut self, id: NodeId, outs: Vec<Out>) {
         for out in outs {
             match out {
-                Out::Persist { term, voted_for } => {
-                    self.sim.disk(id).append(&encode(term, voted_for));
+                Out::Persist { hard, log } => {
+                    if let Some((term, voted_for)) = hard {
+                        self.sim.disk(id).append(&encode_hard(term, voted_for));
+                    }
+                    for op in log {
+                        self.sim.disk(id).append(&encode_op(op));
+                    }
                     self.sim.fsync(id);
                 }
                 Out::Send(to, msg) => self.sim.send(id, to, msg),
