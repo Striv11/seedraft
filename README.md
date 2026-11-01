@@ -36,7 +36,9 @@ Implemented so far: `rng` (SplitMix64), `sim` (virtual clock, event queue, netwo
 
 Day 3 adds `raft`: `Node` is a pure state machine (input -> list of `Out` actions) and `Cluster` runs nodes in the sim, fsyncing `currentTerm`/`votedFor` before any dependent message is sent. The cluster records every leader per term, which the tests use to check election safety.
 
-Day 4 adds log replication: AppendEntries with prev-index/term consistency checks, conflict truncation, batching, `next_index` backoff, the election restriction (up-to-date log), commit only of current-term entries by counting, and a no-op on election. After every simulator step `Cluster` checks log matching, committed-prefix agreement (state machine safety) and leader completeness at election time, collecting `violations()`. The log is in memory only until Day 5.
+Day 4 adds log replication: AppendEntries with prev-index/term consistency checks, conflict truncation, batching, `next_index` backoff, the election restriction (up-to-date log), commit only of current-term entries by counting, and a no-op on election. After every simulator step `Cluster` checks log matching, committed-prefix agreement (state machine safety) and leader completeness at election time, collecting `violations()`. 
+
+Day 5 makes the log durable: `currentTerm`/`votedFor`, appended entries and truncations are write-ahead logged and fsynced before any dependent message is sent; a restarted node replays its disk (`raft::recover`). Tests crash leaders, followers and the whole cluster with torn writes over 1000 seeds. Limitation: fsync is assumed honest; a drive that lies about fsync can lose acknowledged entries and no WAL protocol survives that.
 
 ## Setup
 Requires a stable Rust toolchain.
@@ -60,7 +62,7 @@ See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Disk faults and crash-restart
 - [x] Raft leader election (term/vote persisted)
 - [x] Raft log replication and commit (Day 4)
-- [ ] Raft crash recovery (durable log)
+- [x] Raft crash recovery (durable log, Day 5)
 - [ ] KV with sessions, linearizability checker
 - [ ] CLI sweep, snapshots, joint consensus, minimizer, timeline
 

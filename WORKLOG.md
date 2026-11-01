@@ -32,3 +32,12 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Learned: my first leader-completeness check was wrong (flagged a stale partitioned leader for entries committed after its term); the property only holds at election time.
 - Caveat: log is in-memory, so tests do not crash nodes yet.
 - Next (Day 5): persist the log with fsync before acking, recover on restart, add a figure-8 crash test, no committed entry lost over 1000 seeds with crashes and fsync loss.
+
+## 2026-11-01 — Day 5: persistence and crash recovery
+- Log is now durable: `Node` records `LogOp`s (append, truncate-to) as it mutates the log, and every handler (and `propose`) emits one `Out::Persist { hard, log }` ahead of any send. `Cluster` appends WAL records, fsyncs, and `raft::recover` replays them on restart (term, vote, log).
+- Tests (`tests/recovery.rs`): recovery round-trip equals live state and tolerates garbage records; crashed follower restarts with its exact log; 1000 seeds of random leader/follower crashes, partitions, hostile network and torn writes with per-step invariants and no violations; whole-cluster power loss keeps all committed entries; same-seed determinism with crashes.
+- Mutation check: not persisting log ops makes 4 of 5 recovery tests fail.
+- Learned: with a lying fsync (`fsync_loss_pct > 0`) no WAL protocol is safe, so the Day 5 criterion is tested with honest fsync and torn writes; documented as a limitation.
+- Gotcha: reverting a mutation with `git checkout` wiped uncommitted work; I reapplied it. Commit before mutating.
+- Still open: the figure-8 mutation (commit older-term entries by counting) is not yet shown to be caught; worth a targeted scenario test.
+- Next (Day 6): replicated KV state machine with client sessions for exactly-once, history recorder.
