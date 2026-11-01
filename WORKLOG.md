@@ -23,3 +23,12 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Learned: stale timers are handled with a generation number in the timer id, same idea as the sim's crash epochs. Leader-per-term must be recorded on the role transition, not after actions run.
 - Caveat: persistence assumes fsync works; with fsync loss enabled votes can be forgotten (Day 5 addresses recovery under disk faults).
 - Next (Day 4): log replication and commit, log matching invariant over 1000 seeds.
+
+## 2026-11-01 — Day 4: log replication and commit
+- `raft.rs`: log of `(term, cmd)` entries, AppendEntries with consistency check, idempotent append (duplicates/reordering never truncate), batching, next_index backoff with follower length hint, election restriction in RequestVote, leader no-op on election, commit by majority match restricted to current-term entries. `Cluster::propose` submits to the leader.
+- `Cluster` checks invariants after every step: log matching, committed-prefix agreement across all nodes ever, leader completeness at election. Results in `violations()`.
+- Tests (`tests/replication.rs`): 1000 seeds under drop/dup/reorder + partitions with proposals, no violations and >20k commits overall; healthy-net convergence; minority leader cannot commit and its stale entries get overwritten after heal; same-seed determinism.
+- Mutation check: dropping the election restriction is caught by the invariants. Dropping the current-term-only commit rule is NOT caught yet: the figure-8 scenario needs crashes with a durable log, so that belongs with Day 5.
+- Learned: my first leader-completeness check was wrong (flagged a stale partitioned leader for entries committed after its term); the property only holds at election time.
+- Caveat: log is in-memory, so tests do not crash nodes yet.
+- Next (Day 5): persist the log with fsync before acking, recover on restart, add a figure-8 crash test, no committed entry lost over 1000 seeds with crashes and fsync loss.

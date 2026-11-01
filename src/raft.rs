@@ -1,4 +1,7 @@
-//! Raft leader election (Day 3). Log replication arrives on Day 4.
+//! Raft leader election (Day 3) and log replication with commit (Day 4).
+//!
+//! The log lives in memory only; making it durable across crashes is Day 5's job, so tests
+//! that crash nodes must not yet claim committed entries survive.
 //!
 //! [`Node`] is a pure state machine: handlers take an input and return a list of [`Out`]
 //! actions, and never touch the clock, network or disk themselves. [`Cluster`] wires nodes to
@@ -10,22 +13,43 @@ use crate::sim::{Event, NetConfig, NodeId, Sim};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub type Term = u64;
+/// 1-based log index; 0 means "before the first entry".
+pub type Index = u64;
+
+/// A log entry. `cmd == None` is the no-op a new leader appends to commit older entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Entry {
+    pub term: Term,
+    pub cmd: Option<u64>,
+}
+
+/// Max entries per AppendEntries message.
+const BATCH: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
     RequestVote {
         term: Term,
+        last_index: Index,
+        last_term: Term,
     },
     VoteReply {
         term: Term,
         granted: bool,
     },
-    /// Heartbeat (entries are added on Day 4).
     AppendEntries {
         term: Term,
+        prev_index: Index,
+        prev_term: Term,
+        entries: Vec<Entry>,
+        leader_commit: Index,
     },
+    /// `index` is the follower's last matching index on success, or its log length as a hint
+    /// for backing up `next_index` on failure.
     AppendReply {
         term: Term,
+        success: bool,
+        index: Index,
     },
 }
 
@@ -84,6 +108,11 @@ pub struct Node {
     voted_for: Option<NodeId>,
     role: Role,
     votes: BTreeSet<NodeId>,
+    log: Vec<Entry>,
+    commit: Index,
+    /// Leader state, indexed by peer id.
+    next: Vec<Index>,
+    matched: Vec<Index>,
     /// Bumped whenever timers are re-armed; timers carrying an older generation are stale.
     gen: u64,
 }
@@ -102,6 +131,10 @@ impl Node {
             voted_for,
             role: Role::Follower,
             votes: BTreeSet::new(),
+            log: Vec::new(),
+            commit: 0,
+            next: vec![1; n],
+            matched: vec![0; n],
             gen: 0,
         };
         let outs = vec![node.arm(TimerKind::Election)];
@@ -116,6 +149,23 @@ impl Node {
     }
     pub fn voted_for(&self) -> Option<NodeId> {
         self.voted_for
+    }
+
+    pub fn log(&self) -> &[Entry] {
+        &self.log
+    }
+    pub fn commit_index(&self) -> Index {
+        self.commit
+    }
+    fn last_index(&self) -> Index {
+        self.log.len() as Index
+    }
+    fn term_at(&self, i: Index) -> Term {
+        if i == 0 {
+            0
+        } else {
+            self.log[i as usize - 1].term
+        }
     }
 
     fn majority(&self) -> usize {
@@ -172,7 +222,7 @@ impl Node {
         self.persisting(|s, outs| {
             if heartbeat {
                 if s.role == Role::Leader {
-                    s.broadcast(&Msg::AppendEntries { term: s.term }, outs);
+                    s.replicate_all(outs);
                     outs.push(s.arm(TimerKind::Heartbeat));
                 }
             } else if s.role != Role::Leader {
@@ -181,7 +231,13 @@ impl Node {
                 s.voted_for = Some(s.id);
                 s.votes = BTreeSet::from([s.id]);
                 outs.push(s.arm(TimerKind::Election));
-                s.broadcast(&Msg::RequestVote { term: s.term }, outs);
+                let (last_index, last_term) = (s.last_index(), s.term_at(s.last_index()));
+                let rv = Msg::RequestVote {
+                    term: s.term,
+                    last_index,
+                    last_term,
+                };
+                s.broadcast(&rv, outs);
                 s.maybe_win(outs); // single-node cluster
             }
         })
@@ -190,16 +246,82 @@ impl Node {
     fn maybe_win(&mut self, outs: &mut Vec<Out>) {
         if self.role == Role::Candidate && self.votes.len() >= self.majority() {
             self.role = Role::Leader;
-            self.broadcast(&Msg::AppendEntries { term: self.term }, outs);
+            let next = self.last_index() + 1;
+            self.next = vec![next; self.n];
+            self.matched = vec![0; self.n];
+            self.log.push(Entry {
+                term: self.term,
+                cmd: None,
+            });
+            self.advance_commit();
+            self.replicate_all(outs);
             outs.push(self.arm(TimerKind::Heartbeat));
+        }
+    }
+
+    /// Client entry point: append `cmd` if leader and start replicating it.
+    pub fn propose(&mut self, cmd: u64) -> Option<(Index, Vec<Out>)> {
+        if self.role != Role::Leader {
+            return None;
+        }
+        self.log.push(Entry {
+            term: self.term,
+            cmd: Some(cmd),
+        });
+        let mut outs = Vec::new();
+        self.advance_commit();
+        self.replicate_all(&mut outs);
+        Some((self.last_index(), outs))
+    }
+
+    fn replicate_all(&self, outs: &mut Vec<Out>) {
+        for p in (0..self.n).filter(|&p| p != self.id) {
+            self.replicate_to(p, outs);
+        }
+    }
+
+    fn replicate_to(&self, peer: NodeId, outs: &mut Vec<Out>) {
+        let prev_index = self.next[peer] - 1;
+        let entries = self.log[prev_index as usize..]
+            .iter()
+            .take(BATCH)
+            .copied()
+            .collect();
+        outs.push(Out::Send(
+            peer,
+            Msg::AppendEntries {
+                term: self.term,
+                prev_index,
+                prev_term: self.term_at(prev_index),
+                entries,
+                leader_commit: self.commit,
+            },
+        ));
+    }
+
+    /// Leader: commit the highest index replicated on a majority *in the current term*
+    /// (older-term entries commit only indirectly, Raft paper figure 8).
+    fn advance_commit(&mut self) {
+        self.matched[self.id] = self.last_index();
+        let mut m = self.matched.clone();
+        m.sort_unstable();
+        let candidate = m[self.n - self.majority()];
+        if candidate > self.commit && self.term_at(candidate) == self.term {
+            self.commit = candidate;
         }
     }
 
     pub fn on_message(&mut self, from: NodeId, msg: Msg) -> Vec<Out> {
         self.persisting(|s, outs| match msg {
-            Msg::RequestVote { term } => {
+            Msg::RequestVote {
+                term,
+                last_index,
+                last_term,
+            } => {
                 s.observe_term(term, outs);
-                let granted = term == s.term && s.voted_for.is_none_or(|v| v == from);
+                let mine = (s.term_at(s.last_index()), s.last_index());
+                let up_to_date = (last_term, last_index) >= mine;
+                let granted = term == s.term && up_to_date && s.voted_for.is_none_or(|v| v == from);
                 if granted {
                     s.voted_for = Some(from);
                     if s.role == Role::Follower {
@@ -221,8 +343,19 @@ impl Node {
                     s.maybe_win(outs);
                 }
             }
-            Msg::AppendEntries { term } => {
+            Msg::AppendEntries {
+                term,
+                prev_index,
+                prev_term,
+                entries,
+                leader_commit,
+            } => {
                 s.observe_term(term, outs);
+                let mut reply = Msg::AppendReply {
+                    term: s.term,
+                    success: false,
+                    index: s.last_index(),
+                };
                 if term == s.term {
                     if s.role == Role::Candidate {
                         s.role = Role::Follower;
@@ -230,10 +363,47 @@ impl Node {
                     if s.role == Role::Follower {
                         outs.push(s.arm(TimerKind::Election));
                     }
+                    if prev_index <= s.last_index() && s.term_at(prev_index) == prev_term {
+                        let mut at = prev_index;
+                        for e in entries {
+                            at += 1;
+                            if at <= s.last_index() {
+                                if s.term_at(at) == e.term {
+                                    continue; // already have it (duplicate or reordered)
+                                }
+                                s.log.truncate(at as usize - 1);
+                            }
+                            s.log.push(e);
+                        }
+                        // `at` is the last index this message vouches for.
+                        s.commit = s.commit.max(leader_commit.min(at));
+                        reply = Msg::AppendReply {
+                            term: s.term,
+                            success: true,
+                            index: at,
+                        };
+                    }
                 }
-                outs.push(Out::Send(from, Msg::AppendReply { term: s.term }));
+                outs.push(Out::Send(from, reply));
             }
-            Msg::AppendReply { term } => s.observe_term(term, outs),
+            Msg::AppendReply { term, success, index } => {
+                s.observe_term(term, outs);
+                if term == s.term && s.role == Role::Leader {
+                    if success {
+                        s.matched[from] = s.matched[from].max(index);
+                        s.next[from] = s.next[from].max(s.matched[from] + 1);
+                        s.advance_commit();
+                        if s.matched[from] < s.last_index() {
+                            s.replicate_to(from, outs);
+                        }
+                    } else {
+                        // Back up, never below what is known to match.
+                        let backed = (s.next[from] - 1).min(index + 1);
+                        s.next[from] = backed.max(s.matched[from] + 1).max(1);
+                        s.replicate_to(from, outs);
+                    }
+                }
+            }
         })
     }
 }
@@ -256,6 +426,9 @@ pub struct Cluster {
     pub cfg: RaftConfig,
     nodes: Vec<Node>,
     leaders: BTreeMap<Term, BTreeSet<NodeId>>,
+    /// Every entry any node has ever committed, by index (the global committed prefix).
+    committed: Vec<Entry>,
+    violations: Vec<String>,
 }
 
 impl Cluster {
@@ -265,6 +438,8 @@ impl Cluster {
             cfg,
             nodes: Vec::new(),
             leaders: BTreeMap::new(),
+            committed: Vec::new(),
+            violations: Vec::new(),
         };
         for id in 0..n {
             let (node, outs) = Node::new(id, n, 0, None);
@@ -289,6 +464,78 @@ impl Cluster {
             .filter(|&i| self.sim.is_up(i) && self.nodes[i].role == Role::Leader)
             .map(|i| (i, self.nodes[i].term))
             .collect()
+    }
+
+    /// Invariant violations seen so far (empty means all of Raft's safety properties held).
+    pub fn violations(&self) -> &[String] {
+        &self.violations
+    }
+
+    /// The globally committed prefix of the log.
+    pub fn committed(&self) -> &[Entry] {
+        &self.committed
+    }
+
+    /// Submit `cmd` to the current leader (highest term if several), returning
+    /// `(leader, index)`. `None` if no live leader exists.
+    pub fn propose(&mut self, cmd: u64) -> Option<(NodeId, Index)> {
+        let (leader, _) = self.current_leaders().into_iter().max_by_key(|&(_, t)| t)?;
+        let (index, outs) = self.nodes[leader].propose(cmd)?;
+        self.exec(leader, outs);
+        self.check_node(leader, false);
+        Some((leader, index))
+    }
+
+    /// Check the safety invariants that involve node `id`, which just changed:
+    /// log matching, state-machine safety (committed entries never differ) and
+    /// leader completeness (a leader holds every entry committed before its term).
+    fn check_node(&mut self, id: NodeId, just_elected: bool) {
+        let me = &self.nodes[id];
+        let mut found = Vec::new();
+        let now = self.sim.now();
+        for (j, other) in self.nodes.iter().enumerate().filter(|&(j, _)| j != id) {
+            // Log matching: the highest index with equal terms implies identical prefixes.
+            let common = me.log.len().min(other.log.len());
+            if let Some(i) = (0..common).rev().find(|&i| me.log[i].term == other.log[i].term) {
+                if me.log[..=i] != other.log[..=i] {
+                    found.push(format!(
+                        "t={now}: log matching broken between {id} and {j} at {}",
+                        i + 1
+                    ));
+                }
+            }
+        }
+        // State machine safety / committed-prefix agreement.
+        let upto = me.commit as usize;
+        if upto > me.log.len() {
+            found.push(format!("t={now}: node {id} commit {upto} beyond its log"));
+        } else {
+            for (i, e) in me.log[..upto].iter().enumerate() {
+                match self.committed.get(i) {
+                    Some(c) if c != e => found.push(format!(
+                        "t={now}: node {id} committed {e:?} at {} but {c:?} was committed before",
+                        i + 1
+                    )),
+                    Some(_) => {}
+                    None => self.committed.push(*e),
+                }
+            }
+        }
+        // Leader completeness, checked at the moment of election: everything committed so far
+        // from an earlier term must be in the new leader's log. (Later commits by a newer
+        // leader legitimately do not reach a stale, partitioned old leader.)
+        if just_elected {
+            for (i, c) in self.committed.iter().enumerate() {
+                if c.term < me.term && me.log.get(i) != Some(c) {
+                    found.push(format!(
+                        "t={now}: leader {id} (term {}) lacks committed entry {} {c:?}",
+                        me.term,
+                        i + 1
+                    ));
+                }
+            }
+        }
+        self.violations.extend(found);
     }
 
     pub fn crash(&mut self, id: NodeId) {
@@ -352,6 +599,8 @@ impl Cluster {
                 let outs = self.nodes[node].on_timer(id);
                 self.exec(node, outs);
                 self.note_leader(node, before);
+                let won = before != Role::Leader && self.nodes[node].role == Role::Leader;
+                self.check_node(node, won);
                 true
             }
             Some(Event::Deliver { from, to, msg }) => {
@@ -359,6 +608,8 @@ impl Cluster {
                 let outs = self.nodes[to].on_message(from, msg);
                 self.exec(to, outs);
                 self.note_leader(to, before);
+                let won = before != Role::Leader && self.nodes[to].role == Role::Leader;
+                self.check_node(to, won);
                 true
             }
         }
