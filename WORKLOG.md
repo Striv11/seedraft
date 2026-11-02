@@ -41,3 +41,10 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Gotcha: reverting a mutation with `git checkout` wiped uncommitted work; I reapplied it. Commit before mutating.
 - Still open: the figure-8 mutation (commit older-term entries by counting) is not yet shown to be caught; worth a targeted scenario test.
 - Next (Day 6): replicated KV state machine with client sessions for exactly-once, history recorder.
+
+## 2026-11-02 — Day 6: replicated KV with sessions
+- Added `kv.rs`: `Request`/`Op` (put, get, cas) packed into the `u64` Raft command, `KvStore` with a per-client session table (retry of the latest seq returns the cached reply, older seq is ignored), `Recorder` producing invoke/return `HistOp`s, and `KvHarness` that drives retrying clients against a `Cluster` and applies the committed prefix in order.
+- Tests (`tests/kv.rs`): encoding round-trip, store semantics, duplicates applied once (directly and through the Raft log), 300 seeds of hostile network plus leader crashes with no invariant violations and effects <= distinct requests, single-client history equals a sequential model, same seed => same history.
+- Learned: `Sim::now()` only advances when an event fires, so a poll loop based on it can spin forever once the queue has no event before the target; the harness keeps its own clock. Also: `pkill -f` can match and kill your own shell.
+- Reads go through the log (no read-index/lease optimisation); that is the stretch item.
+- Next (Day 7): WGL-style linearizability checker over `HistOp`s, including indeterminate ops; reject stale read and lost write.

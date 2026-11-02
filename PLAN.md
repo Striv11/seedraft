@@ -9,7 +9,7 @@ Fourteen-day flagship arc. Every milestone has acceptance criteria that can be c
 | 3 | Raft leader election | Property test over 1000 seeds: at most one leader per term; leader elected within bound on healthy net; re-election after leader crash | [x] |
 | 4 | Log replication + commit | Log matching and leader completeness invariants checked each step over 1000 seeds under drops/reorder/dup | [x] |
 | 5 | Persistence and crash recovery | currentTerm/votedFor/log survive crash-restart with fsync loss; no committed entry lost across 1000 seeds with crashes (fsync honest; torn writes on) | [x] |
-| 6 | Replicated KV state machine + client sessions (exactly-once) | Retried/duplicated client requests applied once; session dedupe table test; history recorder emits invoke/return ops | [ ] |
+| 6 | Replicated KV state machine + client sessions (exactly-once) | Retried/duplicated client requests applied once; session dedupe table test; history recorder emits invoke/return ops | [x] |
 | 7 | Linearizability checker (Porcupine/WGL-style) | Accepts hand-built linearizable histories, rejects known-bad ones (stale read, lost write); handles timeouts as indeterminate ops | [ ] |
 | 8 | Fault schedule generator + CLI `run`/`sweep` | `seedraft sweep --seeds 0..2000` runs all seeds, reports failing seed; reproducible with `seedraft run --seed N` | [ ] |
 | 9 | Snapshots / log compaction + InstallSnapshot | Followers far behind catch up via snapshot; state machine equals uncompacted run; checker still passes | [ ] |

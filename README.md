@@ -40,6 +40,8 @@ Day 4 adds log replication: AppendEntries with prev-index/term consistency check
 
 Day 5 makes the log durable: `currentTerm`/`votedFor`, appended entries and truncations are write-ahead logged and fsynced before any dependent message is sent; a restarted node replays its disk (`raft::recover`). Tests crash leaders, followers and the whole cluster with torn writes over 1000 seeds. Limitation: fsync is assumed honest; a drive that lies about fsync can lose acknowledged entries and no WAL protocol survives that.
 
+Day 6 adds `kv`: a replicated key-value store (put/get/cas) whose requests are bit-packed into Raft commands. A per-client session table (last seq + cached reply) makes retried and duplicated requests apply exactly once. `KvHarness` runs retrying clients against the cluster and a `Recorder` emits invoke/return operations (unanswered ones stay indeterminate) for the Day 7 checker. Reads go through the log, so they are linearizable by construction.
+
 ## Setup
 Requires a stable Rust toolchain.
 ```
@@ -63,7 +65,8 @@ See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Raft leader election (term/vote persisted)
 - [x] Raft log replication and commit (Day 4)
 - [x] Raft crash recovery (durable log, Day 5)
-- [ ] KV with sessions, linearizability checker
+- [x] Replicated KV with client sessions and history recorder (Day 6)
+- [ ] Linearizability checker
 - [ ] CLI sweep, snapshots, joint consensus, minimizer, timeline
 
 ## License

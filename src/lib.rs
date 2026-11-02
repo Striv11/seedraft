@@ -4,6 +4,7 @@
 //! `u64` seed, so any run can be replayed exactly.
 
 pub mod disk;
+pub mod kv;
 pub mod raft;
 pub mod rng;
 pub mod sim;
