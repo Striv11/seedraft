@@ -55,3 +55,10 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Learned: my first overlap stress test used 40 concurrent puts; rejecting is exponential (2^n subsets) and ate 2GB. Memoisation bounds it, not eliminates it. Shrunk to 14 and documented. Also a test bug: expected a value no put wrote.
 - Gotcha: `pkill -f` with a pattern that appears in my own command line kills the shell (again).
 - Next (Day 8): fault schedule generator and `seedraft run` / `sweep` CLI that also runs the checker per seed.
+
+## 2026-11-03 — Day 8: fault schedules and CLI
+- Added `runner.rs`: `schedule(seed)` generates crashes/restarts/partitions/heals from its own RNG stream (never more than a minority down, everything undone by the end of the fault window); `run_seed` runs workload + faults, drains, then checks Raft invariants and linearizability. Added `src/bin/seedraft.rs` with `run --seed N` and `sweep --seeds A..B` (exit 1 and a reproduce hint on failure).
+- Tests (`tests/runner.rs`): schedule determinism, majority-up/heal-all properties over 500 seeds, run reproducibility, 60 seeds pass with real progress, CLI sweep/run/bad usage.
+- Result: `sweep --seeds 0..2000` in release takes ~20s, 0 failures, ~400k ops checked.
+- Learned: separate RNG stream for the schedule keeps schedules stable even if the simulation's RNG consumption changes. Failure reporting path is untested end to end until Day 11 bug injection provides a real failing seed.
+- Next (Day 9): snapshots / log compaction and InstallSnapshot.

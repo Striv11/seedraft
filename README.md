@@ -52,6 +52,15 @@ bash check.sh       # fmt + clippy + tests (same as CI)
 ```
 
 ## Demo
+Available now (Day 8):
+
+```
+cargo run --release --bin seedraft -- sweep --seeds 0..2000   # 2000 seeds, 0 failed (~20s)
+cargo run --release --bin seedraft -- run --seed 5            # fault schedule + verdict for one seed
+```
+
+Each seed gets a generated fault schedule (crashes keeping a majority up, partitions, restarts, heal), a client workload, then the Raft invariants and the linearizability checker run over the result. A failing seed is printed with `reproduce: seedraft run --seed N`.
+
 Planned. Target: `seedraft sweep --seeds 0..5000` prints the first failing seed with a minimized event trace, and `seedraft timeline --seed N` draws an ASCII timeline of a partition and leader change.
 
 ## Design decisions & trade-offs
@@ -69,7 +78,8 @@ See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Raft crash recovery (durable log, Day 5)
 - [x] Replicated KV with client sessions and history recorder (Day 6)
 - [x] Linearizability checker (Day 7)
-- [ ] CLI sweep, snapshots, joint consensus, minimizer, timeline
+- [x] Fault schedule generator and `run`/`sweep` CLI (Day 8)
+- [ ] Snapshots, joint consensus, minimizer, timeline
 
 ## License
 MIT. See [LICENSE](LICENSE).
