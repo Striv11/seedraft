@@ -42,6 +42,8 @@ Day 5 makes the log durable: `currentTerm`/`votedFor`, appended entries and trun
 
 Day 6 adds `kv`: a replicated key-value store (put/get/cas) whose requests are bit-packed into Raft commands. A per-client session table (last seq + cached reply) makes retried and duplicated requests apply exactly once. `KvHarness` runs retrying clients against the cluster and a `Recorder` emits invoke/return operations (unanswered ones stay indeterminate) for the Day 7 checker. Reads go through the log, so they are linearizable by construction.
 
+Day 7 adds `lin`: a WGL-style linearizability checker (`lin::check(&history)`). It splits the history per key, searches for a real-time-respecting order that replays against a register model, and memoises visited (linearized set, value) states. Unanswered ops are indeterminate: they may take effect any time after invocation or never. Tests hand-build good histories and reject stale reads, lost writes and vanishing pending writes, then check 200 simulated seeds with leader crashes and show that corrupting a real history is caught. Worst case is exponential in the number of mutually concurrent ops on one key.
+
 ## Setup
 Requires a stable Rust toolchain.
 ```
@@ -66,7 +68,7 @@ See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Raft log replication and commit (Day 4)
 - [x] Raft crash recovery (durable log, Day 5)
 - [x] Replicated KV with client sessions and history recorder (Day 6)
-- [ ] Linearizability checker
+- [x] Linearizability checker (Day 7)
 - [ ] CLI sweep, snapshots, joint consensus, minimizer, timeline
 
 ## License

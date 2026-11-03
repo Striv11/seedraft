@@ -5,6 +5,7 @@
 
 pub mod disk;
 pub mod kv;
+pub mod lin;
 pub mod raft;
 pub mod rng;
 pub mod sim;

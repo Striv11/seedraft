@@ -48,3 +48,10 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Learned: `Sim::now()` only advances when an event fires, so a poll loop based on it can spin forever once the queue has no event before the target; the harness keeps its own clock. Also: `pkill -f` can match and kill your own shell.
 - Reads go through the log (no read-index/lease optimisation); that is the stretch item.
 - Next (Day 7): WGL-style linearizability checker over `HistOp`s, including indeterminate ops; reject stale read and lost write.
+
+## 2026-11-03 — Day 7: linearizability checker
+- Added `lin.rs`: per-key WGL search (real-time horizon, bitset of linearized ops, memo of failed `(set, value)` states). Pending ops are optional and unconstrained in reply; the search succeeds once every completed op is placed.
+- Tests (`tests/lin.rs`): accepts sequential and concurrent histories; rejects stale read, lost write, time-travelling reads, a pending put observed then vanishing, effect before invocation, phantom values; 200 simulated seeds with leader crashes are linearizable; corrupting a real history's get reply is detected.
+- Learned: my first overlap stress test used 40 concurrent puts; rejecting is exponential (2^n subsets) and ate 2GB. Memoisation bounds it, not eliminates it. Shrunk to 14 and documented. Also a test bug: expected a value no put wrote.
+- Gotcha: `pkill -f` with a pattern that appears in my own command line kills the shell (again).
+- Next (Day 8): fault schedule generator and `seedraft run` / `sweep` CLI that also runs the checker per seed.
