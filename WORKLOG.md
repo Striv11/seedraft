@@ -70,3 +70,12 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Tests (`tests/snapshot.rs`): KvStore snapshot round-trip/garbage rejection, lagging follower catches up via snapshot over 40 seeds, every node's state equals replay of the committed prefix over 60 faulty seeds, restart from durable snapshot with torn writes, 200 full linearizability runs with compaction. `sweep --seeds 0..2000 --snapshot-every 8`: 0 failures.
 - Limits: the on-disk WAL is not physically truncated (the sim disk has no rewrite op), so compaction bounds memory and message size but not simulated disk records; snapshots go in one message, no chunking.
 - Next (Day 10): membership change via joint consensus.
+
+## 2026-11-04 — Day 10: membership change via joint consensus
+- `Config { cur, prev }` (voter bitmasks; `prev != 0` = joint) lives in the log as tagged commands, so WAL and AppendEntries are unchanged. A node acts under the last config entry in its log (committed or not), else its snapshot's, else genesis. Quorums (votes and commit index) need a majority of every active set. `Node::change_membership` appends C(old,new) (one change at a time); the leader appends C(new) when the joint entry commits and steps down if C(new) excludes it.
+- Snapshots (`LogOp::Snapshot`, `REC_SNAP`, `InstallSnapshot`) now carry the config, so compaction and late joiners keep it. Non-voters never campaign; `RequestVote` from outside our config is ignored, which stops removed-but-unaware nodes from inflating terms.
+- Cluster: `with_members`, `change_membership`, `committed_config`, plus an invariant that committed configs form stable -> joint -> stable with matching anchors.
+- Tests (`tests/membership.rs`): quorum maths, grow 3->5, shrink 5->3 incl. removing the leader, removed node partitioned away can't disrupt, 1000 seeds of changes mixed with crashes/partitions/hostile net (all invariants + one leader per term), config survives compaction/restart/snapshot install. Mutation check: ignoring the old majority in joint mode makes the quorum and fault tests fail.
+- Learned: the fault test initially passed vacuously because no leader existed at the first step (changes were never accepted); asserting a minimum number of completed changes caught it.
+- Limits: no learner phase; the sweep CLI does not schedule membership changes yet.
+- Next (Day 11): bug injection and trace minimization.
