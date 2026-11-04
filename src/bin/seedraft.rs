@@ -5,8 +5,8 @@ use seedraft::runner::{run_seed, RunConfig};
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
-  seedraft run --seed N [--nodes K]
-  seedraft sweep --seeds A..B [--nodes K]";
+  seedraft run --seed N [--nodes K] [--snapshot-every N]
+  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N]";
 
 fn parse_range(s: &str) -> Option<(u64, u64)> {
     let (a, b) = s.split_once("..")?;
@@ -40,6 +40,9 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
         if !(3..=9).contains(&cfg.nodes) {
             return Err("--nodes must be 3..=9".into());
         }
+    }
+    if let Some(n) = flag(args, "--snapshot-every") {
+        cfg.snapshot_every = n.parse().map_err(|_| "bad --snapshot-every")?;
     }
     match cmd.as_str() {
         "run" => {

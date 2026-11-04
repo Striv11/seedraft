@@ -136,6 +136,58 @@ impl KvStore {
         Some(reply)
     }
 
+    /// Serialise the whole state (data, sessions, effect count) for a Raft snapshot.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&self.effects.to_le_bytes());
+        b.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+        for (&k, &v) in &self.data {
+            b.push(k);
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.extend_from_slice(&(self.sessions.len() as u32).to_le_bytes());
+        for (&c, &(seq, reply)) in &self.sessions {
+            b.push(c);
+            b.extend_from_slice(&seq.to_le_bytes());
+            match reply {
+                Reply::Ok => b.push(0),
+                Reply::Value(None) => b.push(1),
+                Reply::Value(Some(v)) => {
+                    b.push(2);
+                    b.extend_from_slice(&v.to_le_bytes());
+                }
+                Reply::Cas(ok) => b.extend_from_slice(&[3, u8::from(ok)]),
+            }
+        }
+        b
+    }
+
+    /// Inverse of [`KvStore::snapshot`]; `None` if the bytes are malformed.
+    pub fn restore(bytes: &[u8]) -> Option<Self> {
+        let mut r = Reader(bytes);
+        let mut s = Self {
+            effects: u64::from_le_bytes(r.take()?),
+            ..Self::default()
+        };
+        for _ in 0..u32::from_le_bytes(r.take()?) {
+            let k = r.take::<1>()?[0];
+            s.data.insert(k, u16::from_le_bytes(r.take()?));
+        }
+        for _ in 0..u32::from_le_bytes(r.take()?) {
+            let c = r.take::<1>()?[0];
+            let seq = u16::from_le_bytes(r.take()?);
+            let reply = match r.take::<1>()?[0] {
+                0 => Reply::Ok,
+                1 => Reply::Value(None),
+                2 => Reply::Value(Some(u16::from_le_bytes(r.take()?))),
+                3 => Reply::Cas(r.take::<1>()?[0] != 0),
+                _ => return None,
+            };
+            s.sessions.insert(c, (seq, reply));
+        }
+        r.0.is_empty().then_some(s)
+    }
+
     pub fn get(&self, key: u8) -> Option<u16> {
         self.data.get(&key).copied()
     }
@@ -148,6 +200,16 @@ impl KvStore {
     /// Number of requests that actually changed or read state (duplicates excluded).
     pub fn effects(&self) -> u64 {
         self.effects
+    }
+}
+
+struct Reader<'a>(&'a [u8]);
+
+impl Reader<'_> {
+    fn take<const N: usize>(&mut self) -> Option<[u8; N]> {
+        let (head, rest) = self.0.split_first_chunk::<N>()?;
+        self.0 = rest;
+        Some(*head)
     }
 }
 
@@ -246,6 +308,10 @@ pub struct KvHarness {
 
 impl KvHarness {
     pub fn new(seed: u64, nodes: usize, net: NetConfig, wl: Workload) -> Self {
+        Self::with_raft(seed, nodes, net, wl, RaftConfig::default())
+    }
+
+    pub fn with_raft(seed: u64, nodes: usize, net: NetConfig, wl: Workload, raft: RaftConfig) -> Self {
         let clients = (0..wl.clients)
             .map(|_| Client {
                 next_seq: 1,
@@ -253,7 +319,7 @@ impl KvHarness {
             })
             .collect();
         Self {
-            cluster: Cluster::new(seed, nodes, net, RaftConfig::default()),
+            cluster: Cluster::new(seed, nodes, net, raft),
             store: KvStore::new(),
             history: Recorder::default(),
             wl,

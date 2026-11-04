@@ -6,6 +6,7 @@
 
 use crate::kv::{KvHarness, Workload};
 use crate::lin;
+use crate::raft::RaftConfig;
 use crate::rng::Rng;
 use crate::sim::{NetConfig, NodeId};
 use std::fmt;
@@ -45,6 +46,8 @@ pub struct RunConfig {
     pub settle: u64,
     pub net: NetConfig,
     pub workload: Workload,
+    /// Raft log compaction threshold (0 disables snapshots).
+    pub snapshot_every: u64,
 }
 
 impl Default for RunConfig {
@@ -60,6 +63,7 @@ impl Default for RunConfig {
                 ..NetConfig::default()
             },
             workload: Workload::default(),
+            snapshot_every: 0,
         }
     }
 }
@@ -172,7 +176,16 @@ impl Outcome {
 /// Run one seed end to end: workload + faults, then heal, drain, and check everything.
 pub fn run_seed(seed: u64, cfg: &RunConfig) -> Outcome {
     let sched = schedule(seed, cfg);
-    let mut h = KvHarness::new(seed, cfg.nodes, cfg.net.clone(), cfg.workload);
+    let mut h = KvHarness::with_raft(
+        seed,
+        cfg.nodes,
+        cfg.net.clone(),
+        cfg.workload,
+        RaftConfig {
+            snapshot_every: cfg.snapshot_every,
+            ..RaftConfig::default()
+        },
+    );
     for s in &sched {
         h.run_until(s.at);
         match &s.fault {
