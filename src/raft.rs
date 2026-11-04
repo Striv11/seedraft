@@ -26,6 +26,82 @@ pub struct Entry {
     pub cmd: Option<u64>,
 }
 
+/// Cluster membership as a pair of voter bitmasks (node ids < 32). `prev != 0` means the
+/// cluster is in the joint configuration C(old,new): every decision needs a majority of
+/// `prev` *and* a majority of `cur`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Config {
+    pub cur: u32,
+    pub prev: u32,
+}
+
+/// Config entries are log commands with this tag in the top byte (client id 0xFF is reserved).
+const CONF_TAG: u64 = 0xFF << 56;
+
+impl Config {
+    pub fn stable(members: &[NodeId]) -> Self {
+        Self {
+            cur: mask_of(members),
+            prev: 0,
+        }
+    }
+    pub fn is_joint(&self) -> bool {
+        self.prev != 0
+    }
+    /// Every node that takes part in decisions under this configuration.
+    pub fn voters(&self) -> u32 {
+        self.cur | self.prev
+    }
+    pub fn contains(&self, id: NodeId) -> bool {
+        self.voters() >> id & 1 == 1
+    }
+    pub fn members(&self) -> Vec<NodeId> {
+        (0..32).filter(|&i| self.contains(i)).collect()
+    }
+    /// Does `set` hold a majority of every active member set?
+    pub fn has_quorum(&self, set: &BTreeSet<NodeId>) -> bool {
+        let ok = |m: u32| {
+            let size = m.count_ones() as usize;
+            size > 0 && set.iter().filter(|&&i| m >> i & 1 == 1).count() > size / 2
+        };
+        ok(self.cur) && (self.prev == 0 || ok(self.prev))
+    }
+    /// Highest index replicated on a majority of every active member set.
+    fn quorum_match(&self, matched: &[Index]) -> Index {
+        let one = |m: u32| {
+            let mut v: Vec<Index> = (0..matched.len())
+                .filter(|&i| m >> i & 1 == 1)
+                .map(|i| matched[i])
+                .collect();
+            if v.is_empty() {
+                return 0;
+            }
+            v.sort_unstable();
+            v[v.len() - (v.len() / 2 + 1)]
+        };
+        let c = one(self.cur);
+        if self.prev == 0 {
+            c
+        } else {
+            c.min(one(self.prev))
+        }
+    }
+    pub fn encode(&self) -> u64 {
+        CONF_TAG | u64::from(self.prev) << 24 | u64::from(self.cur)
+    }
+    /// `Some` if `cmd` is a config entry.
+    pub fn decode(cmd: u64) -> Option<Self> {
+        (cmd >> 56 == 0xFF).then_some(Self {
+            cur: (cmd & 0xFF_FFFF) as u32,
+            prev: (cmd >> 24 & 0xFF_FFFF) as u32,
+        })
+    }
+}
+
+fn mask_of(ids: &[NodeId]) -> u32 {
+    ids.iter().fold(0, |m, &i| m | 1 << i)
+}
+
 /// Max entries per AppendEntries message.
 const BATCH: usize = 8;
 
@@ -60,6 +136,8 @@ pub enum Msg {
         term: Term,
         last_index: Index,
         last_term: Term,
+        /// Configuration in force as of `last_index`.
+        conf: Config,
         data: Vec<u8>,
     },
 }
@@ -124,6 +202,7 @@ pub enum LogOp {
     Snapshot {
         index: Index,
         term: Term,
+        conf: Config,
         data: Vec<u8>,
     },
 }
@@ -147,6 +226,11 @@ pub struct Node {
     snap_index: Index,
     snap_term: Term,
     snap_data: Vec<u8>,
+    snap_conf: Config,
+    /// Configuration in force: the last config entry in the log (committed or not), else the
+    /// snapshot's, else genesis. `conf_index` is that entry's index (0 if not from the log).
+    conf: Config,
+    conf_index: Index,
     /// Log mutations not yet handed to the environment for persisting.
     wal: Vec<LogOp>,
     commit: Index,
@@ -184,6 +268,17 @@ impl Node {
 
     /// Like [`Node::new`] but from everything recovered from disk, snapshot included.
     pub fn recovered(id: NodeId, n: usize, rec: Recovered) -> (Self, Vec<Out>) {
+        let all: Vec<NodeId> = (0..n).collect();
+        Self::recovered_with(id, n, Config::stable(&all), rec)
+    }
+
+    /// Like [`Node::recovered`] for a cluster whose initial membership is `genesis`.
+    pub fn recovered_with(id: NodeId, n: usize, genesis: Config, rec: Recovered) -> (Self, Vec<Out>) {
+        let snap_conf = if rec.snap_index > 0 {
+            rec.snap_conf.unwrap_or(genesis)
+        } else {
+            genesis
+        };
         let mut node = Self {
             id,
             n,
@@ -195,12 +290,16 @@ impl Node {
             snap_index: rec.snap_index,
             snap_term: rec.snap_term,
             snap_data: rec.snap_data,
+            snap_conf,
+            conf: snap_conf,
+            conf_index: 0,
             wal: Vec::new(),
             commit: rec.snap_index,
             next: vec![1; n],
             matched: vec![0; n],
             gen: 0,
         };
+        node.recompute_conf();
         let outs = vec![node.arm(TimerKind::Election)];
         (node, outs)
     }
@@ -213,6 +312,23 @@ impl Node {
     }
     pub fn voted_for(&self) -> Option<NodeId> {
         self.voted_for
+    }
+
+    /// The configuration this node currently acts under.
+    pub fn config(&self) -> Config {
+        self.conf
+    }
+
+    /// Rebuild `conf` from the snapshot and the log.
+    fn recompute_conf(&mut self) {
+        self.conf = self.snap_conf;
+        self.conf_index = 0;
+        for (k, e) in self.log.iter().enumerate() {
+            if let Some(c) = e.cmd.and_then(Config::decode) {
+                self.conf = c;
+                self.conf_index = self.snap_index + k as Index + 1;
+            }
+        }
     }
 
     pub fn log(&self) -> &[Entry] {
@@ -245,6 +361,10 @@ impl Node {
     }
 
     fn push_entry(&mut self, e: Entry) {
+        if let Some(c) = e.cmd.and_then(Config::decode) {
+            self.conf = c;
+            self.conf_index = self.snap_index + self.log.len() as Index + 1;
+        }
         self.log.push(e);
         self.wal.push(LogOp::Append(e));
     }
@@ -252,8 +372,12 @@ impl Node {
     /// Keep only entries with absolute index `<= last`.
     fn truncate_to(&mut self, last: Index) {
         debug_assert!(last >= self.snap_index);
+        let cut = self.conf_index > last;
         self.log.truncate((last - self.snap_index) as usize);
         self.wal.push(LogOp::TruncateTo(last));
+        if cut {
+            self.recompute_conf();
+        }
     }
 
     /// Local compaction: the state machine has applied everything through `upto` (which must
@@ -263,13 +387,24 @@ impl Node {
             return Vec::new();
         }
         let term = self.term_at(upto);
-        self.log.drain(..(upto - self.snap_index) as usize);
+        // The configuration as of `upto`: the last config entry at or before it.
+        let k = (upto - self.snap_index) as usize;
+        if let Some(c) = self.log[..k]
+            .iter()
+            .rev()
+            .find_map(|e| e.cmd.and_then(Config::decode))
+        {
+            self.snap_conf = c;
+        }
+        self.log.drain(..k);
         self.snap_index = upto;
         self.snap_term = term;
         self.snap_data = data.clone();
+        self.recompute_conf();
         self.wal.push(LogOp::Snapshot {
             index: upto,
             term,
+            conf: self.snap_conf,
             data,
         });
         let mut outs = Vec::new();
@@ -290,8 +425,11 @@ impl Node {
         }
     }
 
-    fn majority(&self) -> usize {
-        self.n / 2 + 1
+    /// Every other node we exchange votes and log entries with.
+    fn peers(&self) -> Vec<NodeId> {
+        (0..self.n)
+            .filter(|&p| p != self.id && self.conf.contains(p))
+            .collect()
     }
 
     fn arm(&mut self, kind: TimerKind) -> Out {
@@ -314,7 +452,7 @@ impl Node {
     }
 
     fn broadcast(&self, msg: &Msg, outs: &mut Vec<Out>) {
-        for peer in (0..self.n).filter(|&p| p != self.id) {
+        for peer in self.peers() {
             outs.push(Out::Send(peer, msg.clone()));
         }
     }
@@ -336,10 +474,16 @@ impl Node {
         self.persisting(|s, outs| {
             if heartbeat {
                 if s.role == Role::Leader {
+                    s.config_progress(outs);
                     s.replicate_all(outs);
                     outs.push(s.arm(TimerKind::Heartbeat));
                 }
             } else if s.role != Role::Leader {
+                if !s.conf.contains(s.id) {
+                    // Not a voter (new, or removed): never campaign, just keep listening.
+                    outs.push(s.arm(TimerKind::Election));
+                    return;
+                }
                 s.role = Role::Candidate;
                 s.term += 1;
                 s.voted_for = Some(s.id);
@@ -358,7 +502,7 @@ impl Node {
     }
 
     fn maybe_win(&mut self, outs: &mut Vec<Out>) {
-        if self.role == Role::Candidate && self.votes.len() >= self.majority() {
+        if self.role == Role::Candidate && self.conf.has_quorum(&self.votes) {
             self.role = Role::Leader;
             let next = self.last_index() + 1;
             self.next = vec![next; self.n];
@@ -368,8 +512,52 @@ impl Node {
                 cmd: None,
             });
             self.advance_commit();
+            self.config_progress(outs);
             self.replicate_all(outs);
             outs.push(self.arm(TimerKind::Heartbeat));
+        }
+    }
+
+    /// Leader: start moving the cluster to voter set `members` through the joint
+    /// configuration. Refused unless this leader is in a stable configuration whose last
+    /// config entry is committed (one change at a time).
+    pub fn change_membership(&mut self, members: &[NodeId]) -> Option<(Index, Vec<Out>)> {
+        let target = mask_of(members);
+        if self.role != Role::Leader
+            || self.conf.is_joint()
+            || self.conf_index > self.commit
+            || target == 0
+            || target == self.conf.cur
+            || members.iter().any(|&m| m >= self.n)
+        {
+            return None;
+        }
+        let joint = Config {
+            cur: target,
+            prev: self.conf.cur,
+        };
+        self.propose(joint.encode())
+    }
+
+    /// Leader: once the joint configuration is committed, append the final one; once a final
+    /// configuration without us is committed, step down.
+    fn config_progress(&mut self, outs: &mut Vec<Out>) {
+        if self.role != Role::Leader {
+            return;
+        }
+        if self.conf.is_joint() && self.conf_index <= self.commit {
+            let fin = Config {
+                cur: self.conf.cur,
+                prev: 0,
+            };
+            self.push_entry(Entry {
+                term: self.term,
+                cmd: Some(fin.encode()),
+            });
+            self.advance_commit();
+        } else if !self.conf.contains(self.id) && self.conf_index <= self.commit {
+            self.role = Role::Follower;
+            outs.push(self.arm(TimerKind::Election));
         }
     }
 
@@ -383,14 +571,16 @@ impl Node {
             cmd: Some(cmd),
         });
         let mut outs = Vec::new();
+        let index = self.last_index();
         self.advance_commit();
+        self.config_progress(&mut outs);
         self.replicate_all(&mut outs);
         self.flush_persist(false, &mut outs);
-        Some((self.last_index(), outs))
+        Some((index, outs))
     }
 
     fn replicate_all(&self, outs: &mut Vec<Out>) {
-        for p in (0..self.n).filter(|&p| p != self.id) {
+        for p in self.peers() {
             self.replicate_to(p, outs);
         }
     }
@@ -404,6 +594,7 @@ impl Node {
                     term: self.term,
                     last_index: self.snap_index,
                     last_term: self.snap_term,
+                    conf: self.snap_conf,
                     data: self.snap_data.clone(),
                 },
             ));
@@ -430,9 +621,7 @@ impl Node {
     /// (older-term entries commit only indirectly, Raft paper figure 8).
     fn advance_commit(&mut self) {
         self.matched[self.id] = self.last_index();
-        let mut m = self.matched.clone();
-        m.sort_unstable();
-        let candidate = m[self.n - self.majority()];
+        let candidate = self.conf.quorum_match(&self.matched);
         if candidate > self.commit && self.term_at(candidate) == self.term {
             self.commit = candidate;
         }
@@ -440,7 +629,7 @@ impl Node {
 
     /// Adopt a leader's snapshot ahead of our commit point. Keep the log suffix only if it
     /// agrees with the snapshot at its last index.
-    fn install_snapshot(&mut self, index: Index, term: Term, data: Vec<u8>) {
+    fn install_snapshot(&mut self, index: Index, term: Term, conf: Config, data: Vec<u8>) {
         let keep_suffix = index <= self.last_index() && self.term_at(index) == term;
         if keep_suffix {
             self.log.drain(..(index - self.snap_index) as usize);
@@ -450,12 +639,22 @@ impl Node {
         self.snap_index = index;
         self.snap_term = term;
         self.snap_data = data.clone();
+        self.snap_conf = conf;
+        self.recompute_conf();
         self.commit = self.commit.max(index);
-        self.wal.push(LogOp::Snapshot { index, term, data });
+        self.wal.push(LogOp::Snapshot {
+            index,
+            term,
+            conf,
+            data,
+        });
     }
 
     pub fn on_message(&mut self, from: NodeId, msg: Msg) -> Vec<Out> {
         self.persisting(|s, outs| match msg {
+            // A node outside our configuration (e.g. removed but unaware) must not be able to
+            // depose us by inflating terms: ignore it entirely.
+            Msg::RequestVote { .. } if !s.conf.contains(from) => {}
             Msg::RequestVote {
                 term,
                 last_index,
@@ -539,6 +738,7 @@ impl Node {
                 term,
                 last_index,
                 last_term,
+                conf,
                 data,
             } => {
                 s.observe_term(term, outs);
@@ -562,7 +762,7 @@ impl Node {
                             index: last_index,
                         };
                     } else {
-                        s.install_snapshot(last_index, last_term, data.clone());
+                        s.install_snapshot(last_index, last_term, conf, data.clone());
                         outs.push(Out::Restore {
                             index: last_index,
                             data,
@@ -583,6 +783,7 @@ impl Node {
                         s.matched[from] = s.matched[from].max(index);
                         s.next[from] = s.next[from].max(s.matched[from] + 1);
                         s.advance_commit();
+                        s.config_progress(outs);
                         if s.matched[from] < s.last_index() {
                             s.replicate_to(from, outs);
                         }
@@ -624,10 +825,16 @@ fn encode_op(op: &LogOp) -> Vec<u8> {
             b.extend_from_slice(&n.to_le_bytes());
             b
         }
-        LogOp::Snapshot { index, term, data } => {
+        LogOp::Snapshot {
+            index,
+            term,
+            conf,
+            data,
+        } => {
             let mut b = vec![REC_SNAP];
             b.extend_from_slice(&index.to_le_bytes());
             b.extend_from_slice(&term.to_le_bytes());
+            b.extend_from_slice(&conf.encode().to_le_bytes());
             b.extend_from_slice(data);
             b
         }
@@ -648,6 +855,8 @@ pub struct Recovered {
     pub snap_index: Index,
     pub snap_term: Term,
     pub snap_data: Vec<u8>,
+    /// Configuration as of the snapshot (`None`: the cluster's genesis configuration).
+    pub snap_conf: Option<Config>,
 }
 
 /// Replay intact disk records in order. Unknown or malformed records are skipped.
@@ -675,7 +884,11 @@ pub fn recover(records: &[Vec<u8>]) -> Recovered {
                 }
             }
             Some(&REC_SNAP) => {
-                if let (Some(index), Some(term)) = (u64_at(rec, 1), u64_at(rec, 9)) {
+                if let (Some(index), Some(term), Some(conf)) = (
+                    u64_at(rec, 1),
+                    u64_at(rec, 9),
+                    u64_at(rec, 17).and_then(Config::decode),
+                ) {
                     let k = index.wrapping_sub(r.snap_index) as usize;
                     let agrees =
                         index > r.snap_index && k <= r.log.len() && (k == 0 || r.log[k - 1].term == term);
@@ -687,7 +900,8 @@ pub fn recover(records: &[Vec<u8>]) -> Recovered {
                         }
                         r.snap_index = index;
                         r.snap_term = term;
-                        r.snap_data = rec[17..].to_vec();
+                        r.snap_conf = Some(conf);
+                        r.snap_data = rec[25..].to_vec();
                     }
                 }
             }
@@ -701,6 +915,9 @@ pub fn recover(records: &[Vec<u8>]) -> Recovered {
 pub struct Cluster {
     pub sim: Sim<Msg>,
     pub cfg: RaftConfig,
+    genesis: Config,
+    /// The latest committed configuration, for checking the chain of changes.
+    conf_chain: Config,
     nodes: Vec<Node>,
     leaders: BTreeMap<Term, BTreeSet<NodeId>>,
     /// Every entry any node has ever committed, by index (the global committed prefix).
@@ -714,7 +931,17 @@ pub struct Cluster {
 
 impl Cluster {
     pub fn new(seed: u64, n: usize, net: NetConfig, cfg: RaftConfig) -> Self {
+        let all: Vec<NodeId> = (0..n).collect();
+        Self::with_members(seed, n, &all, net, cfg)
+    }
+
+    /// A universe of `n` simulated machines of which only `members` start as voters; the
+    /// rest idle until a membership change adds them.
+    pub fn with_members(seed: u64, n: usize, members: &[NodeId], net: NetConfig, cfg: RaftConfig) -> Self {
+        let genesis = Config::stable(members);
         let mut c = Self {
+            genesis,
+            conf_chain: genesis,
             sim: Sim::new(seed, n, net),
             cfg,
             nodes: Vec::new(),
@@ -726,7 +953,7 @@ impl Cluster {
             snapshots_installed: 0,
         };
         for id in 0..n {
-            let (node, outs) = Node::new(id, n, 0, None, Vec::new());
+            let (node, outs) = Node::recovered_with(id, n, genesis, Recovered::default());
             c.nodes.push(node);
             c.exec(id, outs);
         }
@@ -765,9 +992,24 @@ impl Cluster {
         &self.violations
     }
 
+    /// The latest committed configuration.
+    pub fn committed_config(&self) -> Config {
+        self.conf_chain
+    }
+
     /// The globally committed prefix of the log.
     pub fn committed(&self) -> &[Entry] {
         &self.committed
+    }
+
+    /// Ask the current leader to change the voter set to `members`. Returns `(leader, index)`
+    /// of the joint-configuration entry, or `None` if there is no leader or it refuses.
+    pub fn change_membership(&mut self, members: &[NodeId]) -> Option<(NodeId, Index)> {
+        let (leader, _) = self.current_leaders().into_iter().max_by_key(|&(_, t)| t)?;
+        let (index, outs) = self.nodes[leader].change_membership(members)?;
+        self.exec(leader, outs);
+        self.check_node(leader, false);
+        Some((leader, index))
     }
 
     /// Submit `cmd` to the current leader (highest term if several), returning
@@ -815,7 +1057,25 @@ impl Cluster {
                         "t={now}: node {id} committed {e:?} at {i} but {c:?} was committed before"
                     )),
                     Some(_) => {}
-                    None if self.committed.len() as Index == i - 1 => self.committed.push(e),
+                    None if self.committed.len() as Index == i - 1 => {
+                        self.committed.push(e);
+                        if let Some(c) = e.cmd.and_then(Config::decode) {
+                            // Committed configs must walk stable -> joint -> stable, each step
+                            // anchored at the previous one, so no two disjoint majorities exist.
+                            let ok = if self.conf_chain.is_joint() {
+                                !c.is_joint() && c.cur == self.conf_chain.cur
+                            } else {
+                                c.is_joint() && c.prev == self.conf_chain.cur
+                            };
+                            if !ok {
+                                found.push(format!(
+                                    "t={now}: committed config {c:?} at {i} does not follow {:?}",
+                                    self.conf_chain
+                                ));
+                            }
+                            self.conf_chain = c;
+                        }
+                    }
                     None => found.push(format!("t={now}: node {id} commits {i} past a gap")),
                 }
             }
@@ -854,7 +1114,11 @@ impl Cluster {
         while self.applied[id] < self.nodes[id].commit {
             let i = self.applied[id] + 1;
             let Some(e) = self.nodes[id].entry(i) else { break };
-            if let Some(r) = e.cmd.and_then(Request::decode) {
+            if let Some(r) = e
+                .cmd
+                .filter(|&c| Config::decode(c).is_none())
+                .and_then(Request::decode)
+            {
                 self.machines[id].apply(r);
             }
             self.applied[id] = i;
@@ -885,7 +1149,7 @@ impl Cluster {
             KvStore::new()
         };
         self.applied[id] = rec.snap_index;
-        let (node, outs) = Node::recovered(id, self.nodes.len(), rec);
+        let (node, outs) = Node::recovered_with(id, self.nodes.len(), self.genesis, rec);
         self.nodes[id] = node;
         self.exec(id, outs);
     }
