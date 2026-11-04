@@ -62,3 +62,11 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Result: `sweep --seeds 0..2000` in release takes ~20s, 0 failures, ~400k ops checked.
 - Learned: separate RNG stream for the schedule keeps schedules stable even if the simulation's RNG consumption changes. Failure reporting path is untested end to end until Day 11 bug injection provides a real failing seed.
 - Next (Day 9): snapshots / log compaction and InstallSnapshot.
+
+## 2026-11-04 — Day 9: snapshots and InstallSnapshot
+- Raft log is now offset by `snap_index`; all index math goes through `entry(i)`/`term_at(i)`. `RaftConfig::snapshot_every` (0 = off, the default, so existing traces are unchanged) makes the cluster snapshot a node's KV state machine once that many applied entries accumulate and drop the covered log prefix (`Node::compact`).
+- Leaders send `InstallSnapshot` when a follower's `next_index` falls inside the compacted prefix; followers keep their log suffix only if it agrees with the snapshot's last term, and emit `Out::Restore` so the cluster swaps the state machine. Snapshots are a WAL record (`REC_SNAP`) replayed by `recover`; torn snapshot records fall back to the earlier full log.
+- Each node now owns a `KvStore` fed by its own commits (`Cluster::machine`); invariants were rewritten for absolute indices, plus a new check that every snapshot covers a committed prefix with the committed term.
+- Tests (`tests/snapshot.rs`): KvStore snapshot round-trip/garbage rejection, lagging follower catches up via snapshot over 40 seeds, every node's state equals replay of the committed prefix over 60 faulty seeds, restart from durable snapshot with torn writes, 200 full linearizability runs with compaction. `sweep --seeds 0..2000 --snapshot-every 8`: 0 failures.
+- Limits: the on-disk WAL is not physically truncated (the sim disk has no rewrite op), so compaction bounds memory and message size but not simulated disk records; snapshots go in one message, no chunking.
+- Next (Day 10): membership change via joint consensus.

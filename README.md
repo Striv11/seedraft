@@ -56,6 +56,7 @@ Available now (Day 8):
 
 ```
 cargo run --release --bin seedraft -- sweep --seeds 0..2000   # 2000 seeds, 0 failed (~20s)
+cargo run --release --bin seedraft -- sweep --seeds 0..2000 --snapshot-every 8   # with log compaction, 0 failed
 cargo run --release --bin seedraft -- run --seed 5            # fault schedule + verdict for one seed
 ```
 
@@ -79,7 +80,8 @@ See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Replicated KV with client sessions and history recorder (Day 6)
 - [x] Linearizability checker (Day 7)
 - [x] Fault schedule generator and `run`/`sweep` CLI (Day 8)
-- [ ] Snapshots, joint consensus, minimizer, timeline
+- [x] Snapshots / log compaction and InstallSnapshot (Day 9)
+- [ ] Joint consensus, minimizer, timeline
 
 ## License
 MIT. See [LICENSE](LICENSE).
