@@ -6,7 +6,7 @@
 
 use crate::kv::{KvHarness, Workload};
 use crate::lin;
-use crate::raft::RaftConfig;
+use crate::raft::{Bug, RaftConfig};
 use crate::rng::Rng;
 use crate::sim::{NetConfig, NodeId};
 use std::fmt;
@@ -48,6 +48,8 @@ pub struct RunConfig {
     pub workload: Workload,
     /// Raft log compaction threshold (0 disables snapshots).
     pub snapshot_every: u64,
+    /// Inject a known protocol bug (for validating the harness).
+    pub bug: Option<Bug>,
 }
 
 impl Default for RunConfig {
@@ -64,6 +66,7 @@ impl Default for RunConfig {
             },
             workload: Workload::default(),
             snapshot_every: 0,
+            bug: None,
         }
     }
 }
@@ -143,12 +146,22 @@ pub enum Failure {
     Invariant(Vec<String>),
     /// History is not linearizable on `key`.
     NotLinearizable { key: u8, ops: Vec<usize> },
+    /// The implementation panicked (corrupt state reached an assertion or bad index).
+    Panic(String),
 }
 
 impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Failure::Invariant(v) => write!(f, "raft invariant violated: {}", v.join("; ")),
+            Failure::Invariant(v) => {
+                let more = v.len().saturating_sub(1);
+                write!(f, "raft invariant violated: {}", v[0])?;
+                if more > 0 {
+                    write!(f, " (+{more} more)")?;
+                }
+                Ok(())
+            }
+            Failure::Panic(m) => write!(f, "panic: {m}"),
             Failure::NotLinearizable { key, ops } => {
                 write!(f, "history not linearizable on key {key} (ops {ops:?})")
             }
@@ -175,7 +188,33 @@ impl Outcome {
 
 /// Run one seed end to end: workload + faults, then heal, drain, and check everything.
 pub fn run_seed(seed: u64, cfg: &RunConfig) -> Outcome {
-    let sched = schedule(seed, cfg);
+    run_schedule(seed, cfg, schedule(seed, cfg))
+}
+
+/// Like [`run_seed`] but with an explicit fault schedule (used when shrinking a failure).
+/// The schedule must be time-ordered; faults that make no sense (restarting a node that is
+/// up) are no-ops, so any subsequence of a valid schedule is runnable.
+pub fn run_schedule(seed: u64, cfg: &RunConfig, sched: Vec<Scheduled>) -> Outcome {
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(seed, cfg, &sched)));
+    attempt.unwrap_or_else(|e| {
+        let msg = e
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_else(|| "unknown".into());
+        Outcome {
+            seed,
+            schedule: sched,
+            ops: 0,
+            completed: 0,
+            committed: 0,
+            trace_hash: 0,
+            failure: Some(Failure::Panic(msg)),
+        }
+    })
+}
+
+fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
     let mut h = KvHarness::with_raft(
         seed,
         cfg.nodes,
@@ -183,10 +222,11 @@ pub fn run_seed(seed: u64, cfg: &RunConfig) -> Outcome {
         cfg.workload,
         RaftConfig {
             snapshot_every: cfg.snapshot_every,
+            bug: cfg.bug,
             ..RaftConfig::default()
         },
     );
-    for s in &sched {
+    for s in sched {
         h.run_until(s.at);
         match &s.fault {
             Fault::Crash(n) => h.cluster.crash(*n),
@@ -211,7 +251,7 @@ pub fn run_seed(seed: u64, cfg: &RunConfig) -> Outcome {
     };
     Outcome {
         seed,
-        schedule: sched,
+        schedule: sched.to_vec(),
         ops: ops.len(),
         completed,
         committed: h.cluster.committed().len(),

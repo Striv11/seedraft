@@ -9,6 +9,7 @@ pub mod lin;
 pub mod raft;
 pub mod rng;
 pub mod runner;
+pub mod shrink;
 pub mod sim;
 
 pub use disk::{Disk, DiskConfig};

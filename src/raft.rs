@@ -157,6 +157,36 @@ pub struct RaftConfig {
     pub heartbeat: u64,
     /// Compact the log once this many applied entries sit above the last snapshot (0 = never).
     pub snapshot_every: u64,
+    /// Deliberately broken behaviour, for checking that the harness catches real bugs.
+    pub bug: Option<Bug>,
+}
+
+/// Known protocol bugs that can be switched on to validate the test harness itself.
+/// Production runs never set one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Bug {
+    /// Grant a vote even if already voted for someone else this term (two leaders per term).
+    DoubleVote,
+    /// Grant votes to candidates with stale logs (committed entries can be lost).
+    SkipLogRecencyCheck,
+    /// Process AppendEntries from a leader of an older term (the "skipped term check").
+    AcceptStaleAppend,
+}
+
+impl Bug {
+    pub const ALL: [Bug; 3] = [Bug::DoubleVote, Bug::SkipLogRecencyCheck, Bug::AcceptStaleAppend];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Bug::DoubleVote => "double-vote",
+            Bug::SkipLogRecencyCheck => "skip-log-recency",
+            Bug::AcceptStaleAppend => "accept-stale-append",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Bug> {
+        Bug::ALL.into_iter().find(|b| b.name() == s)
+    }
 }
 
 impl Default for RaftConfig {
@@ -166,6 +196,7 @@ impl Default for RaftConfig {
             election_max: 300,
             heartbeat: 50,
             snapshot_every: 0,
+            bug: None,
         }
     }
 }
@@ -216,6 +247,8 @@ pub enum TimerKind {
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: NodeId,
+    /// Injected bug (testing the harness only).
+    pub bug: Option<Bug>,
     n: usize,
     term: Term,
     voted_for: Option<NodeId>,
@@ -281,6 +314,7 @@ impl Node {
         };
         let mut node = Self {
             id,
+            bug: None,
             n,
             term: rec.term,
             voted_for: rec.voted_for,
@@ -662,8 +696,9 @@ impl Node {
             } => {
                 s.observe_term(term, outs);
                 let mine = (s.term_at(s.last_index()), s.last_index());
-                let up_to_date = (last_term, last_index) >= mine;
-                let granted = term == s.term && up_to_date && s.voted_for.is_none_or(|v| v == from);
+                let up_to_date = (last_term, last_index) >= mine || s.bug == Some(Bug::SkipLogRecencyCheck);
+                let free = s.voted_for.is_none_or(|v| v == from) || s.bug == Some(Bug::DoubleVote);
+                let granted = term == s.term && up_to_date && free;
                 if granted {
                     s.voted_for = Some(from);
                     if s.role == Role::Follower {
@@ -698,7 +733,7 @@ impl Node {
                     success: false,
                     index: s.last_index(),
                 };
-                if term == s.term {
+                if term == s.term || (s.bug == Some(Bug::AcceptStaleAppend) && term < s.term) {
                     if s.role == Role::Candidate {
                         s.role = Role::Follower;
                     }
@@ -953,7 +988,8 @@ impl Cluster {
             snapshots_installed: 0,
         };
         for id in 0..n {
-            let (node, outs) = Node::recovered_with(id, n, genesis, Recovered::default());
+            let (mut node, outs) = Node::recovered_with(id, n, genesis, Recovered::default());
+            node.bug = c.cfg.bug;
             c.nodes.push(node);
             c.exec(id, outs);
         }
@@ -1149,7 +1185,8 @@ impl Cluster {
             KvStore::new()
         };
         self.applied[id] = rec.snap_index;
-        let (node, outs) = Node::recovered_with(id, self.nodes.len(), self.genesis, rec);
+        let (mut node, outs) = Node::recovered_with(id, self.nodes.len(), self.genesis, rec);
+        node.bug = self.cfg.bug;
         self.nodes[id] = node;
         self.exec(id, outs);
     }

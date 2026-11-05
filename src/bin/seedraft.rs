@@ -1,12 +1,36 @@
 //! `seedraft run --seed N` replays one seed verbosely; `seedraft sweep --seeds A..B` runs many
 //! and reports every failing seed (exit code 1 if any failed).
 
-use seedraft::runner::{run_seed, RunConfig};
+use seedraft::raft::Bug;
+use seedraft::runner::{run_seed, Outcome, RunConfig};
+use seedraft::shrink::shrink;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
-  seedraft run --seed N [--nodes K] [--snapshot-every N]
-  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N]";
+  seedraft run --seed N [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink]
+  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink]
+bugs (injected on purpose, to check the harness catches them):
+  double-vote, skip-log-recency, accept-stale-append";
+
+/// Delta-debug a failing outcome and print the minimal fault schedule.
+fn print_shrunk(o: &Outcome, cfg: &RunConfig) {
+    let Some(s) = shrink(o, cfg) else {
+        println!("  (failure did not reproduce while shrinking)");
+        return;
+    };
+    println!(
+        "  shrunk fault schedule {} -> {} faults in {} runs:",
+        s.original_faults,
+        s.schedule.len(),
+        s.runs
+    );
+    for f in &s.schedule {
+        println!("    {f}");
+    }
+    if let Some(f) = &s.outcome.failure {
+        println!("  still fails: {f}");
+    }
+}
 
 fn parse_range(s: &str) -> Option<(u64, u64)> {
     let (a, b) = s.split_once("..")?;
@@ -44,6 +68,14 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
     if let Some(n) = flag(args, "--snapshot-every") {
         cfg.snapshot_every = n.parse().map_err(|_| "bad --snapshot-every")?;
     }
+    if let Some(b) = flag(args, "--bug") {
+        cfg.bug = Some(Bug::parse(b).ok_or("unknown --bug")?);
+    }
+    if cfg.bug.is_some() {
+        // Broken protocols may panic on corrupt state; that is reported as a failure.
+        std::panic::set_hook(Box::new(|_| {}));
+    }
+    let do_shrink = args.iter().any(|a| a == "--shrink");
     match cmd.as_str() {
         "run" => {
             let seed: u64 = flag(args, "--seed")
@@ -64,6 +96,9 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
                 None => println!("result: ok"),
                 Some(f) => println!("result: FAIL: {f}"),
             }
+            if do_shrink && !o.ok() {
+                print_shrunk(&o, &cfg);
+            }
             Ok(if o.ok() {
                 ExitCode::SUCCESS
             } else {
@@ -81,6 +116,9 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
                 if let Some(f) = &o.failure {
                     println!("seed {seed}: FAIL: {f}");
                     failed.push(seed);
+                    if do_shrink && failed.len() == 1 {
+                        print_shrunk(&o, &cfg);
+                    }
                 }
             }
             println!(
