@@ -14,7 +14,7 @@ Fourteen-day flagship arc. Every milestone has acceptance criteria that can be c
 | 8 | Fault schedule generator + CLI `run`/`sweep` | `seedraft sweep --seeds 0..2000` runs all seeds, reports failing seed; reproducible with `seedraft run --seed N` | [x] |
 | 9 | Snapshots / log compaction + InstallSnapshot | Followers far behind catch up via snapshot; state machine equals uncompacted run; checker still passes | [x] |
 | 10 | Membership change via joint consensus | Add/remove node under partitions with no two disjoint majorities; invariants over 1000 seeds | [x] |
-| 11 | Bug injection and trace minimization | Seeded known bugs (e.g. skip term check) are caught; failing trace shrunk by delta-debugging to a smaller reproducer | [ ] |
+| 11 | Bug injection and trace minimization | Seeded known bugs (e.g. skip term check) are caught; failing trace shrunk by delta-debugging to a smaller reproducer | [x] |
 | 12 | ASCII timeline renderer | Partition + leader change rendered as per-node lanes; snapshot test of output | [ ] |
 | 13 | Performance and coverage of the fault space | 10k seeds in under 60s release; fault-injection stats reported; fuzz-style seed corpus of past failures | [ ] |
 | 14 | Polish: README demo with real output, docs, release tag | Demo section verified from a fresh clone in under two minutes; roadmap updated | [ ] |

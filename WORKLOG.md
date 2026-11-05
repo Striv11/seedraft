@@ -79,3 +79,11 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Learned: the fault test initially passed vacuously because no leader existed at the first step (changes were never accepted); asserting a minimum number of completed changes caught it.
 - Limits: no learner phase; the sweep CLI does not schedule membership changes yet.
 - Next (Day 11): bug injection and trace minimization.
+
+## 2026-11-05 — Day 11: bug injection and trace minimization
+- `Bug` enum (`double-vote`, `skip-log-recency`, `accept-stale-append`) wired into `Node` via `RaftConfig::bug`; CLI `--bug NAME`. `run_schedule` runs an explicit fault schedule and turns panics into `Failure::Panic`, since broken nodes hit bad indices.
+- `shrink::shrink`: ddmin over the fault schedule with seed fixed and failure class preserved. Typical result: 8 faults -> 2-3. `--shrink` on `run`/`sweep` prints it. `Failure` display now truncates the (tens of thousands of) repeated invariant violations to the first plus a count.
+- Tests (`tests/bugs.rs`): each bug caught within a small seed budget, same seeds pass unbugged, shrunk schedule is smaller, still fails, 1-minimal and deterministic, CLI flags.
+- Learned: a figure-8 "commit old terms" bug was not caught by 4000 random seeds, so I removed it rather than ship an undetected one; it needs a targeted scenario. Restarting a node that is up is a no-op yet can still be kept by ddmin, because extra `run_until` stops perturb scheduling.
+- Limits: only the schedule is shrunk (not workload, node count or time).
+- Next (Day 12): ASCII timeline renderer.

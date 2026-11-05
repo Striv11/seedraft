@@ -67,6 +67,18 @@ Planned. Target: `seedraft sweep --seeds 0..5000` prints the first failing seed 
 ## Membership changes
 `Cluster::with_members(seed, n, &[0,1,2], ..)` starts a universe of `n` machines of which only some are voters; `Cluster::change_membership(&[..])` asks the leader to move to a new voter set through the joint configuration C(old,new), as in the Raft thesis: the joint entry takes effect as soon as it is appended, needs a majority of *both* sets, and once it commits the leader appends the final C(new) entry. Config entries are ordinary log commands (top byte `0xFF`, so KV client id 255 is reserved), snapshots carry the configuration, and nodes outside their configuration never campaign and have their `RequestVote`s ignored, so a removed node cannot depose the cluster. A leader removed by the change steps down once C(new) commits. The simulator checks that committed configs form a valid stable -> joint -> stable chain. Not modelled: non-voting learners (a freshly added node must catch up before the joint entry can commit) and a CLI flag for membership schedules.
 
+## Bug injection and trace minimization
+To prove the harness can find bugs, `RaftConfig::bug` (CLI `--bug NAME`) switches on a known protocol defect: `double-vote` (vote twice in a term), `skip-log-recency` (grant votes to candidates with stale logs) or `accept-stale-append` (handle AppendEntries from an older term). Panics inside a broken node are reported as failures too. `--shrink` then delta-debugs (ddmin) the failing seed's fault schedule, keeping the seed fixed and the failure class the same, down to a 1-minimal reproducer:
+
+```
+$ seedraft sweep --seeds 0..300 --bug skip-log-recency --shrink
+  shrunk fault schedule 8 -> 2 faults in 15 runs:
+    t=1205  partition [[0, 3, 4]]
+    t=3000  heal
+  still fails: raft invariant violated: ... leader 2 (term 10) lacks committed entry 112 ...
+```
+A fourth candidate, committing old-term entries by replica count (Raft figure 8), was dropped: random schedules did not trigger it in 4000 seeds, so it needs a targeted scenario rather than a sweep. Only the fault schedule is shrunk, not the workload.
+
 ## Design decisions & trade-offs
 - Own SplitMix64 instead of the `rand` crate: zero dependencies and a stream that can never change under us, which matters for seed replay.
 - Messages are formatted to strings in the trace so traces are comparable and printable; costs speed, simplifies debugging.
@@ -85,7 +97,8 @@ See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Fault schedule generator and `run`/`sweep` CLI (Day 8)
 - [x] Snapshots / log compaction and InstallSnapshot (Day 9)
 - [x] Membership change via joint consensus (Day 10)
-- [ ] Bug injection and minimizer, timeline
+- [x] Bug injection and schedule minimizer (Day 11)
+- [ ] ASCII timeline
 
 ## License
 MIT. See [LICENSE](LICENSE).
