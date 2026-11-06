@@ -87,3 +87,11 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Learned: a figure-8 "commit old terms" bug was not caught by 4000 random seeds, so I removed it rather than ship an undetected one; it needs a targeted scenario. Restarting a node that is up is a no-op yet can still be kept by ddmin, because extra `run_until` stops perturb scheduling.
 - Limits: only the schedule is shrunk (not workload, node count or time).
 - Next (Day 12): ASCII timeline renderer.
+
+## 2026-11-06 — Day 12: ASCII timeline renderer
+- `timeline::render(seed, cfg, schedule, cols)`: per-node lanes (leader/candidate/follower/down), fault row, max-term row; `--timeline` on `seedraft run`. Columns with several different faults show `*`.
+- Tests (`tests/timeline.rs`): determinism, shape and markers, leader change visible after a leader crash, golden snapshot in `tests/golden/timeline_seed7.txt`.
+- Learned: sampling by `run_until` per column perturbs scheduling relative to a plain run (same effect as the ddmin note on Day 11), so the timeline is a faithful picture of its own replay, not byte-identical to the sweep's trace; documented in the README.
+- Limits: sampled view, so short elections between samples can be missed; no message-level arrows.
+- Note: the debug-mode suite takes ~13 min (kv and lin dominate); worth speeding up on Day 13.
+- Next (Day 13): performance and fault-space coverage stats, seed corpus.

@@ -7,7 +7,7 @@ use seedraft::shrink::shrink;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
-  seedraft run --seed N [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink]
+  seedraft run --seed N [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink] [--timeline]
   seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink]
 bugs (injected on purpose, to check the harness catches them):
   double-vote, skip-log-recency, accept-stale-append";
@@ -92,6 +92,9 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
                 "ops {} ({} completed), committed entries {}, trace hash {:016x}",
                 o.ops, o.completed, o.committed, o.trace_hash
             );
+            if args.iter().any(|a| a == "--timeline") {
+                print!("{}", seedraft::timeline::render(seed, &cfg, &o.schedule, 72));
+            }
             match &o.failure {
                 None => println!("result: ok"),
                 Some(f) => println!("result: FAIL: {f}"),

@@ -11,6 +11,7 @@ pub mod rng;
 pub mod runner;
 pub mod shrink;
 pub mod sim;
+pub mod timeline;
 
 pub use disk::{Disk, DiskConfig};
 pub use rng::Rng;

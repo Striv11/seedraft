@@ -1,0 +1,7 @@
+seed 7, 150 ticks/column, t=0..6000
+fault          x         P     H   r          
+n0    .........XXXXXXXXXXXXXXXXXXXX...........
+n1    .LLLLLLLLLLLLLLLLLLLLLLLL...............
+n2    .....................cccccLLLLLLLLLLLLLL
+term  0111111111111111111112334455555555555555
+L leader  c candidate  . follower  X down | x crash  r restart  P partition  H heal

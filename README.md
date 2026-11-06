@@ -44,6 +44,16 @@ Day 6 adds `kv`: a replicated key-value store (put/get/cas) whose requests are b
 
 Day 7 adds `lin`: a WGL-style linearizability checker (`lin::check(&history)`). It splits the history per key, searches for a real-time-respecting order that replays against a register model, and memoises visited (linearized set, value) states. Unanswered ops are indeterminate: they may take effect any time after invocation or never. Tests hand-build good histories and reject stale reads, lost writes and vanishing pending writes, then check 200 simulated seeds with leader crashes and show that corrupting a real history is caught. Worst case is exponential in the number of mutually concurrent ops on one key.
 
+Day 12 adds `timeline`: `seedraft run --seed N --timeline` replays the seed and draws one lane per node (`L` leader, `c` candidate, `.` follower, `X` down) with a fault row (`x` crash, `r` restart, `P` partition, `H` heal) and the highest term. Example (3 nodes, leader crashed at t=1500, node 1 partitioned at 3000):
+```
+fault          x         P     H   r
+n0    .........XXXXXXXXXXXXXXXXXXXX...........
+n1    .LLLLLLLLLLLLLLLLLLLLLLLL...............
+n2    .....................cccccLLLLLLLLLLLLLL
+term  0111111111111111111112334455555555555555
+```
+The render steps the sim in column-sized chunks, so its scheduling can differ slightly from the plain `run` of the same seed; it is deterministic on its own.
+
 ## Setup
 Requires a stable Rust toolchain.
 ```
