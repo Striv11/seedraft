@@ -177,7 +177,108 @@ pub struct Outcome {
     pub completed: usize,
     pub committed: usize,
     pub trace_hash: u64,
+    /// Distinct terms that had a leader (a proxy for how much election churn the run saw).
+    pub elections: usize,
+    pub snapshots_installed: u64,
     pub failure: Option<Failure>,
+}
+
+/// How much of the fault space a set of runs exercised.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Coverage {
+    pub seeds: u64,
+    pub crashes: u64,
+    pub restarts: u64,
+    pub partitions: u64,
+    pub heals: u64,
+    /// Seeds where a node was down at the moment a partition started.
+    pub crash_during_partition: u64,
+    /// Seeds that saw two or more leader terms (i.e. at least one re-election).
+    pub reelections: u64,
+    pub snapshots_installed: u64,
+    pub ops: u64,
+    pub completed: u64,
+}
+
+impl Coverage {
+    pub fn add(&mut self, o: &Outcome) {
+        self.seeds += 1;
+        let mut down = 0i64;
+        for s in &o.schedule {
+            match &s.fault {
+                Fault::Crash(_) => {
+                    self.crashes += 1;
+                    down += 1;
+                }
+                Fault::Restart(_) => {
+                    self.restarts += 1;
+                    down -= 1;
+                }
+                Fault::Partition(_) => {
+                    self.partitions += 1;
+                    if down > 0 {
+                        self.crash_during_partition += 1;
+                    }
+                }
+                Fault::Heal => self.heals += 1,
+            }
+        }
+        if o.elections >= 2 {
+            self.reelections += 1;
+        }
+        self.snapshots_installed += o.snapshots_installed;
+        self.ops += o.ops as u64;
+        self.completed += o.completed as u64;
+    }
+
+    pub fn merge(&mut self, other: &Coverage) {
+        self.seeds += other.seeds;
+        self.crashes += other.crashes;
+        self.restarts += other.restarts;
+        self.partitions += other.partitions;
+        self.heals += other.heals;
+        self.crash_during_partition += other.crash_during_partition;
+        self.reelections += other.reelections;
+        self.snapshots_installed += other.snapshots_installed;
+        self.ops += other.ops;
+        self.completed += other.completed;
+    }
+}
+
+/// Run seeds `lo..hi` on `jobs` threads. Every seed still runs in its own single-threaded
+/// simulator, so each outcome is identical to what `run_seed` gives; results come back in
+/// seed order regardless of `jobs`. The failing outcomes are returned in full, passing runs
+/// are only folded into the coverage numbers.
+pub fn sweep(lo: u64, hi: u64, cfg: &RunConfig, jobs: usize) -> (Coverage, Vec<Outcome>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+    let next = AtomicU64::new(lo);
+    let acc = Mutex::new((Coverage::default(), Vec::new()));
+    std::thread::scope(|sc| {
+        for _ in 0..jobs.max(1) {
+            sc.spawn(|| {
+                let mut cov = Coverage::default();
+                let mut bad = Vec::new();
+                loop {
+                    let seed = next.fetch_add(1, Ordering::Relaxed);
+                    if seed >= hi {
+                        break;
+                    }
+                    let o = run_seed(seed, cfg);
+                    cov.add(&o);
+                    if !o.ok() {
+                        bad.push(o);
+                    }
+                }
+                let mut g = acc.lock().unwrap();
+                g.0.merge(&cov);
+                g.1.extend(bad);
+            });
+        }
+    });
+    let (cov, mut bad) = acc.into_inner().unwrap();
+    bad.sort_by_key(|o| o.seed);
+    (cov, bad)
 }
 
 impl Outcome {
@@ -209,6 +310,8 @@ pub fn run_schedule(seed: u64, cfg: &RunConfig, sched: Vec<Scheduled>) -> Outcom
             completed: 0,
             committed: 0,
             trace_hash: 0,
+            elections: 0,
+            snapshots_installed: 0,
             failure: Some(Failure::Panic(msg)),
         }
     })
@@ -226,6 +329,7 @@ fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
             ..RaftConfig::default()
         },
     );
+    h.cluster.sim.set_trace_recording(false);
     for s in sched {
         h.run_until(s.at);
         match &s.fault {
@@ -256,6 +360,8 @@ fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
         completed,
         committed: h.cluster.committed().len(),
         trace_hash: h.cluster.sim.trace_hash(),
+        elections: h.cluster.leaders_by_term().len(),
+        snapshots_installed: h.cluster.snapshots_installed(),
         failure,
     }
 }

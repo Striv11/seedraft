@@ -2,13 +2,14 @@
 //! and reports every failing seed (exit code 1 if any failed).
 
 use seedraft::raft::Bug;
-use seedraft::runner::{run_seed, Outcome, RunConfig};
+use seedraft::runner::{run_seed, sweep, Outcome, RunConfig};
 use seedraft::shrink::shrink;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
   seedraft run --seed N [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink] [--timeline]
-  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink]
+  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink] [--jobs J]
+  seedraft corpus [FILE]     replay the seed corpus (default corpus/seeds.txt)
 bugs (injected on purpose, to check the harness catches them):
   double-vote, skip-log-recency, accept-stale-append";
 
@@ -58,6 +59,22 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 fn real_main(args: &[String]) -> Result<ExitCode, String> {
     let cmd = args.first().ok_or("missing command")?;
+    if cmd == "corpus" {
+        let path = args.get(1).map_or("corpus/seeds.txt", String::as_str);
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+        let entries = seedraft::corpus::parse(&text).map_err(|e| format!("{path}: {e}"))?;
+        std::panic::set_hook(Box::new(|_| {}));
+        let bad = seedraft::corpus::replay(&entries);
+        for b in &bad {
+            println!("{b}");
+        }
+        println!("{} corpus entries, {} unexpected", entries.len(), bad.len());
+        return Ok(if bad.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        });
+    }
     let mut cfg = RunConfig::default();
     if let Some(n) = flag(args, "--nodes") {
         cfg.nodes = n.parse().map_err(|_| "bad --nodes")?;
@@ -111,24 +128,39 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
         "sweep" => {
             let (lo, hi) = parse_range(flag(args, "--seeds").ok_or("missing --seeds")?)
                 .ok_or("--seeds must look like A..B with A <= B (B exclusive)")?;
+            let jobs = match flag(args, "--jobs") {
+                Some(j) => j.parse().map_err(|_| "bad --jobs")?,
+                None => std::thread::available_parallelism().map_or(1, |n| n.get()),
+            };
+            let started = std::time::Instant::now();
+            let (cov, bad) = sweep(lo, hi, &cfg, jobs);
             let mut failed = Vec::new();
-            let mut ops = 0;
-            for seed in lo..hi {
-                let o = run_seed(seed, &cfg);
-                ops += o.ops;
-                if let Some(f) = &o.failure {
-                    println!("seed {seed}: FAIL: {f}");
-                    failed.push(seed);
-                    if do_shrink && failed.len() == 1 {
-                        print_shrunk(&o, &cfg);
-                    }
+            for o in &bad {
+                println!("seed {}: FAIL: {}", o.seed, o.failure.as_ref().expect("bad"));
+                failed.push(o.seed);
+                if do_shrink && failed.len() == 1 {
+                    print_shrunk(o, &cfg);
                 }
             }
+            let ops = cov.ops;
             println!(
                 "{} seeds ({lo}..{hi}), {ops} ops checked, {} failed",
                 hi - lo,
                 failed.len()
             );
+            println!(
+                "coverage: {} crashes, {} restarts, {} partitions, {} heals; {} seeds crashed during a partition, {} saw a re-election; {} snapshots installed; {}/{} ops completed",
+                cov.crashes,
+                cov.restarts,
+                cov.partitions,
+                cov.heals,
+                cov.crash_during_partition,
+                cov.reelections,
+                cov.snapshots_installed,
+                cov.completed,
+                cov.ops
+            );
+            eprintln!("{:.1}s on {jobs} thread(s)", started.elapsed().as_secs_f64());
             if let Some(s) = failed.first() {
                 println!("reproduce: seedraft run --seed {s}");
                 return Ok(ExitCode::FAILURE);

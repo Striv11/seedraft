@@ -1,0 +1,22 @@
+# Seed corpus: seeds that exposed (or must never expose) a failure.
+# Format: <bug|none> <seed> [nodes] [snapshot_every]
+# A line naming a bug must FAIL under that injected bug (the harness still catches it);
+# a `none` line must PASS on the real protocol (a regression guard).
+# Replay with: seedraft corpus
+double-vote 10
+double-vote 23
+double-vote 79 5 8
+skip-log-recency 1
+skip-log-recency 4
+skip-log-recency 6
+accept-stale-append 32
+accept-stale-append 77
+# The same schedules that broke the bugged variants must be fine on the real protocol.
+none 1
+none 4
+none 10
+none 23
+none 32
+none 77
+none 79 5 8
+none 6

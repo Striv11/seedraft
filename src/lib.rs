@@ -3,6 +3,7 @@
 //! Everything nondeterministic (time, message delay, loss, reordering) is derived from one
 //! `u64` seed, so any run can be replayed exactly.
 
+pub mod corpus;
 pub mod disk;
 pub mod kv;
 pub mod lin;

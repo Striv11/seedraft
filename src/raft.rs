@@ -256,6 +256,10 @@ pub struct Node {
     votes: BTreeSet<NodeId>,
     /// Entries after the snapshot: `log[0]` has index `snap_index + 1`.
     log: Vec<Entry>,
+    /// Bumped whenever existing log content is discarded or replaced (truncation, snapshot
+    /// install). Appends and compaction keep earlier indexes intact and do not count. Lets the
+    /// invariant checker reuse earlier comparisons of two logs.
+    rewrites: u64,
     snap_index: Index,
     snap_term: Term,
     snap_data: Vec<u8>,
@@ -321,6 +325,7 @@ impl Node {
             role: Role::Follower,
             votes: BTreeSet::new(),
             log: rec.log,
+            rewrites: 0,
             snap_index: rec.snap_index,
             snap_term: rec.snap_term,
             snap_data: rec.snap_data,
@@ -408,6 +413,7 @@ impl Node {
         debug_assert!(last >= self.snap_index);
         let cut = self.conf_index > last;
         self.log.truncate((last - self.snap_index) as usize);
+        self.rewrites += 1;
         self.wal.push(LogOp::TruncateTo(last));
         if cut {
             self.recompute_conf();
@@ -669,6 +675,7 @@ impl Node {
             self.log.drain(..(index - self.snap_index) as usize);
         } else {
             self.log.clear();
+            self.rewrites += 1;
         }
         self.snap_index = index;
         self.snap_term = term;
@@ -962,6 +969,9 @@ pub struct Cluster {
     machines: Vec<KvStore>,
     applied: Vec<Index>,
     snapshots_installed: u64,
+    /// For each pair `(lo, hi)` of nodes: `(rewrites of lo, rewrites of hi, n)` meaning their
+    /// logs were already compared and found identical through index `n`.
+    agreed: Vec<Vec<(u64, u64, Index)>>,
 }
 
 impl Cluster {
@@ -986,6 +996,7 @@ impl Cluster {
             machines: vec![KvStore::new(); n],
             applied: vec![0; n],
             snapshots_installed: 0,
+            agreed: vec![vec![(0, 0, 0); n]; n],
         };
         for id in 0..n {
             let (mut node, outs) = Node::recovered_with(id, n, genesis, Recovered::default());
@@ -1074,10 +1085,22 @@ impl Cluster {
                 .rev()
                 .find(|&i| me.entry(i).map(|e| e.term) == other.entry(i).map(|e| e.term))
             {
-                if (lo + 1..=i).any(|k| me.entry(k) != other.entry(k)) {
+                // Entries below `from` were already compared and neither log has been
+                // rewritten since, so only the new part needs checking.
+                let (a, b) = (id.min(j), id.max(j));
+                let (ra, rb) = if a == id {
+                    (me.rewrites, other.rewrites)
+                } else {
+                    (other.rewrites, me.rewrites)
+                };
+                let (sa, sb, upto) = self.agreed[a][b];
+                let from = if (sa, sb) == (ra, rb) { upto.max(lo) } else { lo };
+                if (from + 1..=i).any(|k| me.entry(k) != other.entry(k)) {
                     found.push(format!(
                         "t={now}: log matching broken between {id} and {j} at {i}"
                     ));
+                } else {
+                    self.agreed[a][b] = (ra, rb, i);
                 }
             }
         }
@@ -1177,6 +1200,9 @@ impl Cluster {
             return;
         }
         self.sim.restart(id);
+        for k in 0..self.nodes.len() {
+            self.agreed[id.min(k)][id.max(k)] = (0, 0, 0);
+        }
         self.sim.disk(id).repair();
         let rec = recover(&self.sim.disk(id).read_records());
         self.machines[id] = if rec.snap_index > 0 {

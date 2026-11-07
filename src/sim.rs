@@ -37,6 +37,20 @@ impl Default for NetConfig {
     }
 }
 
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+struct Fnv(u64);
+
+impl std::fmt::Write for Fnv {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        for b in s.bytes() {
+            self.0 ^= u64::from(b);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        Ok(())
+    }
+}
+
 /// Something the simulator hands back to the driver.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event<M> {
@@ -137,6 +151,10 @@ pub struct Sim<M> {
     disks: Vec<Disk>,
     disk_cfg: DiskConfig,
     trace: Vec<TraceEntry>,
+    /// Keep `trace` entries (the hash is maintained either way).
+    record_trace: bool,
+    /// Running FNV-1a hash over the Debug text of every trace entry.
+    hash: u64,
 }
 
 impl<M: Clone + Debug> Sim<M> {
@@ -154,6 +172,8 @@ impl<M: Clone + Debug> Sim<M> {
             disks: vec![Disk::new(); nodes],
             disk_cfg: DiskConfig::default(),
             trace: Vec::new(),
+            record_trace: true,
+            hash: FNV_OFFSET,
         }
     }
 
@@ -183,14 +203,27 @@ impl<M: Clone + Debug> Sim<M> {
         &mut self.rng
     }
 
+    /// Stop (or resume) keeping trace entries in memory. The fingerprint from
+    /// [`Sim::trace_hash`] is identical either way; only `trace()` is affected. Sweeps turn
+    /// this off because the trace of a passing run is never read.
+    pub fn set_trace_recording(&mut self, on: bool) {
+        self.record_trace = on;
+    }
+
     /// FNV-1a hash of the trace: a cheap fingerprint to compare runs.
     pub fn trace_hash(&self) -> u64 {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in format!("{:?}", self.trace).bytes() {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        self.hash
+    }
+
+    fn log(&mut self, e: TraceEntry) {
+        use std::fmt::Write;
+        // Hash the entry's Debug text as it is produced, without building a String.
+        let mut w = Fnv(self.hash);
+        let _ = write!(w, "{e:?}");
+        self.hash = w.0;
+        if self.record_trace {
+            self.trace.push(e);
         }
-        h
     }
 
     fn push(&mut self, at: u64, ev: Event<M>) {
@@ -223,7 +256,7 @@ impl<M: Clone + Debug> Sim<M> {
     /// Fsync a node's disk through the fault model; the outcome is traced.
     pub fn fsync(&mut self, node: NodeId) -> bool {
         let ok = self.disks[node].fsync(&self.disk_cfg, &mut self.rng);
-        self.trace.push(TraceEntry::Fsync {
+        self.log(TraceEntry::Fsync {
             at: self.now,
             node,
             ok,
@@ -240,7 +273,7 @@ impl<M: Clone + Debug> Sim<M> {
         self.up[node] = false;
         self.epoch[node] += 1;
         let torn_bytes = self.disks[node].crash(&self.disk_cfg, &mut self.rng);
-        self.trace.push(TraceEntry::Crash {
+        self.log(TraceEntry::Crash {
             at: self.now,
             node,
             torn_bytes,
@@ -253,7 +286,7 @@ impl<M: Clone + Debug> Sim<M> {
             return;
         }
         self.up[node] = true;
-        self.trace.push(TraceEntry::Restart { at: self.now, node });
+        self.log(TraceEntry::Restart { at: self.now, node });
     }
 
     /// Schedule a timer `after` ticks from now.
@@ -274,7 +307,7 @@ impl<M: Clone + Debug> Sim<M> {
                 self.group[n] = i + 1;
             }
         }
-        self.trace.push(TraceEntry::Partition {
+        self.log(TraceEntry::Partition {
             at: self.now,
             groups: groups.to_vec(),
         });
@@ -282,20 +315,20 @@ impl<M: Clone + Debug> Sim<M> {
 
     pub fn heal(&mut self) {
         self.group.iter_mut().for_each(|g| *g = 0);
-        self.trace.push(TraceEntry::Heal { at: self.now });
+        self.log(TraceEntry::Heal { at: self.now });
     }
 
     /// Send through the faulty network: may drop, delay, reorder or duplicate.
     pub fn send(&mut self, from: NodeId, to: NodeId, msg: M) {
         let at = self.now;
-        self.trace.push(TraceEntry::Send {
+        self.log(TraceEntry::Send {
             at,
             from,
             to,
             msg: format!("{msg:?}"),
         });
         if !self.up[from] {
-            self.trace.push(TraceEntry::Drop {
+            self.log(TraceEntry::Drop {
                 at,
                 from,
                 to,
@@ -304,7 +337,7 @@ impl<M: Clone + Debug> Sim<M> {
             return;
         }
         if !self.connected(from, to) {
-            self.trace.push(TraceEntry::Drop {
+            self.log(TraceEntry::Drop {
                 at,
                 from,
                 to,
@@ -313,7 +346,7 @@ impl<M: Clone + Debug> Sim<M> {
             return;
         }
         if self.rng.chance_pct(self.net.drop_pct) {
-            self.trace.push(TraceEntry::Drop {
+            self.log(TraceEntry::Drop {
                 at,
                 from,
                 to,
@@ -322,7 +355,7 @@ impl<M: Clone + Debug> Sim<M> {
             return;
         }
         let copies = if self.rng.chance_pct(self.net.dup_pct) {
-            self.trace.push(TraceEntry::Dup { at, from, to });
+            self.log(TraceEntry::Dup { at, from, to });
             2
         } else {
             1
@@ -351,7 +384,7 @@ impl<M: Clone + Debug> Sim<M> {
             match q.ev {
                 Event::Deliver { from, to, msg } => {
                     if !self.connected(from, to) {
-                        self.trace.push(TraceEntry::Drop {
+                        self.log(TraceEntry::Drop {
                             at: self.now,
                             from,
                             to,
@@ -360,7 +393,7 @@ impl<M: Clone + Debug> Sim<M> {
                         continue;
                     }
                     if !self.up[to] {
-                        self.trace.push(TraceEntry::Drop {
+                        self.log(TraceEntry::Drop {
                             at: self.now,
                             from,
                             to,
@@ -368,7 +401,7 @@ impl<M: Clone + Debug> Sim<M> {
                         });
                         continue;
                     }
-                    self.trace.push(TraceEntry::Deliver {
+                    self.log(TraceEntry::Deliver {
                         at: self.now,
                         from,
                         to,
@@ -380,7 +413,7 @@ impl<M: Clone + Debug> Sim<M> {
                     if !self.up[node] || q.epoch != self.epoch[node] {
                         continue; // timer belonged to a previous incarnation
                     }
-                    self.trace.push(TraceEntry::Timer {
+                    self.log(TraceEntry::Timer {
                         at: self.now,
                         node,
                         id,
