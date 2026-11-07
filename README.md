@@ -65,14 +65,24 @@ bash check.sh       # fmt + clippy + tests (same as CI)
 Available now (Day 8):
 
 ```
-cargo run --release --bin seedraft -- sweep --seeds 0..2000   # 2000 seeds, 0 failed (~20s)
+cargo run --release --bin seedraft -- sweep --seeds 0..10000  # 10k seeds, 0 failed (~43s on 2 cores)
 cargo run --release --bin seedraft -- sweep --seeds 0..2000 --snapshot-every 8   # with log compaction, 0 failed
 cargo run --release --bin seedraft -- run --seed 5            # fault schedule + verdict for one seed
 ```
 
 Each seed gets a generated fault schedule (crashes keeping a majority up, partitions, restarts, heal), a client workload, then the Raft invariants and the linearizability checker run over the result. A failing seed is printed with `reproduce: seedraft run --seed N`.
 
-Planned. Target: `seedraft sweep --seeds 0..5000` prints the first failing seed with a minimized event trace, and `seedraft timeline --seed N` draws an ASCII timeline of a partition and leader change.
+### Speed, coverage and the seed corpus (Day 13)
+`sweep` runs seeds on all cores (`--jobs J` to override). Each seed is still its own single-threaded simulator, so outcomes and failing-seed order do not depend on the thread count. It ends with a coverage line, e.g. for `0..10000`:
+
+```
+10000 seeds (0..10000), 1983195 ops checked, 0 failed
+coverage: 22794 crashes, 22794 restarts, 16473 partitions, 16473 heals; 7259 seeds crashed during a partition, 9587 saw a re-election; 0 snapshots installed; 1983195/1983195 ops completed
+```
+
+`--snapshot-every 8` makes the snapshot count non-zero. Where the time went: the simulator rendered the whole trace to one `Debug` string to hash it (now hashed incrementally, and not stored during sweeps), and the log-matching invariant re-compared whole log prefixes on every step (now only the part not yet verified, reset whenever either log is truncated or replaced). Single-thread cost dropped from ~23 ms to ~5.4 ms per seed.
+
+`corpus/seeds.txt` lists seeds worth keeping: ones that expose each injected bug, and the same seeds on the real protocol. `seedraft corpus` replays them (a bugged line must fail, a `none` line must pass); a test does the same in `cargo test`.
 
 ## Membership changes
 `Cluster::with_members(seed, n, &[0,1,2], ..)` starts a universe of `n` machines of which only some are voters; `Cluster::change_membership(&[..])` asks the leader to move to a new voter set through the joint configuration C(old,new), as in the Raft thesis: the joint entry takes effect as soon as it is appended, needs a majority of *both* sets, and once it commits the leader appends the final C(new) entry. Config entries are ordinary log commands (top byte `0xFF`, so KV client id 255 is reserved), snapshots carry the configuration, and nodes outside their configuration never campaign and have their `RequestVote`s ignored, so a removed node cannot depose the cluster. A leader removed by the change steps down once C(new) commits. The simulator checks that committed configs form a valid stable -> joint -> stable chain. Not modelled: non-voting learners (a freshly added node must catch up before the joint entry can commit) and a CLI flag for membership schedules.
@@ -108,7 +118,8 @@ See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Snapshots / log compaction and InstallSnapshot (Day 9)
 - [x] Membership change via joint consensus (Day 10)
 - [x] Bug injection and schedule minimizer (Day 11)
-- [ ] ASCII timeline
+- [x] ASCII timeline (Day 12)
+- [x] Parallel sweep, coverage stats, seed corpus (Day 13)
 
 ## License
 MIT. See [LICENSE](LICENSE).

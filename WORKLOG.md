@@ -95,3 +95,12 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Limits: sampled view, so short elections between samples can be missed; no message-level arrows.
 - Note: the debug-mode suite takes ~13 min (kv and lin dominate); worth speeding up on Day 13.
 - Next (Day 13): performance and fault-space coverage stats, seed corpus.
+
+## 2026-11-07 — Day 13: performance, coverage stats, seed corpus
+- Speed: 10k seeds now take ~43s in release on 2 cores (was ~230s extrapolated). Two causes found by timing experiments (no `perf` here): `trace_hash` formatted the entire trace into one string, and `check_node` recompared whole log prefixes for every node pair on every step. Trace is now hashed incrementally per entry (same fingerprint whether or not entries are stored; sweeps do not store them), and the log-matching check keeps a per-pair "verified through index N" watermark, invalidated by a per-node `rewrites` counter bumped on truncate / snapshot-install and reset on restart. ~23 ms -> ~5.4 ms per seed single-threaded.
+- `runner::sweep` + `--jobs`: per-thread simulators over an atomic seed counter, results in seed order; `Coverage` stats (crashes, partitions, crashes-during-partition, re-elections, snapshots installed, ops) printed after every sweep.
+- Seed corpus: `corpus/seeds.txt`, `corpus::{parse, replay}`, `seedraft corpus`. Seeds found by sweeping each injected bug; plus the same seeds on the real protocol.
+- Tests (`tests/coverage.rs`): hash independent of recording, parallel == sequential (including failing seeds), coverage arithmetic, corpus parsing/replay/not-caught detection, CLI. The existing bug tests still catch the injected log-matching bug, which exercises the incremental check.
+- Learned: 2 threads gave only ~1.25x over 1 here (shared cores), so the single-thread wins mattered more than parallelism. Corpus entries are shape-sensitive: seed 6 fails under skip-log-recency with 5 nodes but not 3.
+- Limits: the 10k < 60s target is not enforced by a test (debug-mode timing is meaningless); no seed-time histogram or message-level coverage. Debug-mode test suite is still slow.
+- Next (Day 14): README demo verified from a fresh clone, docs polish, release tag.
