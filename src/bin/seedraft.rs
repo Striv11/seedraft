@@ -59,6 +59,10 @@ fn flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
 
 fn real_main(args: &[String]) -> Result<ExitCode, String> {
     let cmd = args.first().ok_or("missing command")?;
+    if matches!(cmd.as_str(), "--help" | "-h" | "help") {
+        println!("{USAGE}");
+        return Ok(ExitCode::SUCCESS);
+    }
     if cmd == "corpus" {
         let path = args.get(1).map_or("corpus/seeds.txt", String::as_str);
         let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;

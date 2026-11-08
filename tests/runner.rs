@@ -94,3 +94,17 @@ fn cli_rejects_bad_usage() {
     assert_eq!(bin(&["run"]).0, 2);
     assert_eq!(bin(&["run", "--seed", "1", "--nodes", "2"]).0, 2);
 }
+
+#[test]
+fn cli_help_prints_usage_and_succeeds() {
+    for flag in ["--help", "-h", "help"] {
+        let (code, out) = bin(&[flag]);
+        assert_eq!(code, 0, "{flag}");
+        assert!(
+            out.contains("seedraft sweep") && out.contains("seedraft corpus"),
+            "{out}"
+        );
+    }
+    let (code, _) = bin(&["bogus"]);
+    assert_eq!(code, 2);
+}

@@ -28,7 +28,7 @@ Deterministic simulation testing (FoundationDB, TigerBeetle) fixes this by makin
                                    | linearizability |
                                    | checker *       |
                                    +-----------------+
-   (* = planned, see PLAN.md)
+   (* = implemented after the first diagram; every box now exists, see PLAN.md)
 ```
 Key invariant: the simulator is single-threaded, never reads the wall clock, and all randomness comes from one seeded generator; events are ordered by `(time, insertion sequence)`.
 
@@ -62,12 +62,15 @@ bash check.sh       # fmt + clippy + tests (same as CI)
 ```
 
 ## Demo
-Available now (Day 8):
+Verified from a fresh `git clone` (release build ~5s, then every command below runs in seconds except the 10k sweep):
 
 ```
 cargo run --release --bin seedraft -- sweep --seeds 0..10000  # 10k seeds, 0 failed (~43s on 2 cores)
 cargo run --release --bin seedraft -- sweep --seeds 0..2000 --snapshot-every 8   # with log compaction, 0 failed
 cargo run --release --bin seedraft -- run --seed 5            # fault schedule + verdict for one seed
+cargo run --release --bin seedraft -- run --seed 5 --timeline # per-node lanes
+cargo run --release --bin seedraft -- corpus                  # replay the seed corpus: 16 entries, 0 unexpected
+cargo run --release --bin seedraft -- --help                  # all flags
 ```
 
 Each seed gets a generated fault schedule (crashes keeping a majority up, partitions, restarts, heal), a client workload, then the Raft invariants and the linearizability checker run over the result. A failing seed is printed with `reproduce: seedraft run --seed N`.
@@ -120,6 +123,7 @@ See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Bug injection and schedule minimizer (Day 11)
 - [x] ASCII timeline (Day 12)
 - [x] Parallel sweep, coverage stats, seed corpus (Day 13)
+- [x] README demo verified from a fresh clone, `--help` (Day 14)
 
 ## License
 MIT. See [LICENSE](LICENSE).

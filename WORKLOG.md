@@ -104,3 +104,10 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Learned: 2 threads gave only ~1.25x over 1 here (shared cores), so the single-thread wins mattered more than parallelism. Corpus entries are shape-sensitive: seed 6 fails under skip-log-recency with 5 nodes but not 3.
 - Limits: the 10k < 60s target is not enforced by a test (debug-mode timing is meaningless); no seed-time histogram or message-level coverage. Debug-mode test suite is still slow.
 - Next (Day 14): README demo verified from a fresh clone, docs polish, release tag.
+
+## 2026-11-08 — Day 14: polish and fresh-clone verification
+- Cloned the repo to a clean directory and ran the README demo: release build ~4.5s, `sweep --seeds 0..200` 0 failed in 1.7s, `run --seed 5` (+ `--timeline`) ok, `corpus` 16 entries 0 unexpected. All matched the README.
+- Fixed stale README text ("Available now (Day 8)", "planned" diagram footnote), listed the timeline/corpus commands in the demo, added a roadmap line.
+- `seedraft --help`/`-h`/`help` now prints usage and exits 0 (previously "unknown command", exit 2); unknown commands still exit 2. Test in `tests/runner.rs`.
+- Not done: a release tag. I cannot push tags (only commits are pushed), so tag `v0.1.0` by hand after this lands. The 10k-seed timing is still unenforced in tests.
+- Next: stretch items in PLAN.md (pre-vote/leases, learners, figure-8 scenario).
