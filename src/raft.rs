@@ -171,16 +171,24 @@ pub enum Bug {
     SkipLogRecencyCheck,
     /// Process AppendEntries from a leader of an older term (the "skipped term check").
     AcceptStaleAppend,
+    /// Commit older-term entries by counting replicas (the Raft paper's figure-8 bug).
+    CommitOldTerm,
 }
 
 impl Bug {
-    pub const ALL: [Bug; 3] = [Bug::DoubleVote, Bug::SkipLogRecencyCheck, Bug::AcceptStaleAppend];
+    pub const ALL: [Bug; 4] = [
+        Bug::DoubleVote,
+        Bug::SkipLogRecencyCheck,
+        Bug::AcceptStaleAppend,
+        Bug::CommitOldTerm,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Bug::DoubleVote => "double-vote",
             Bug::SkipLogRecencyCheck => "skip-log-recency",
             Bug::AcceptStaleAppend => "accept-stale-append",
+            Bug::CommitOldTerm => "commit-old-term",
         }
     }
 
@@ -662,7 +670,9 @@ impl Node {
     fn advance_commit(&mut self) {
         self.matched[self.id] = self.last_index();
         let candidate = self.conf.quorum_match(&self.matched);
-        if candidate > self.commit && self.term_at(candidate) == self.term {
+        if candidate > self.commit
+            && (self.term_at(candidate) == self.term || self.bug == Some(Bug::CommitOldTerm))
+        {
             self.commit = candidate;
         }
     }

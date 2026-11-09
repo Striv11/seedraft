@@ -11,7 +11,7 @@ const USAGE: &str = "usage:
   seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink] [--jobs J]
   seedraft corpus [FILE]     replay the seed corpus (default corpus/seeds.txt)
 bugs (injected on purpose, to check the harness catches them):
-  double-vote, skip-log-recency, accept-stale-append";
+  double-vote, skip-log-recency, accept-stale-append, commit-old-term";
 
 /// Delta-debug a failing outcome and print the minimal fault schedule.
 fn print_shrunk(o: &Outcome, cfg: &RunConfig) {

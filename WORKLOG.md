@@ -111,3 +111,9 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - `seedraft --help`/`-h`/`help` now prints usage and exits 0 (previously "unknown command", exit 2); unknown commands still exit 2. Test in `tests/runner.rs`.
 - Not done: a release tag. I cannot push tags (only commits are pushed), so tag `v0.1.0` by hand after this lands. The 10k-seed timing is still unenforced in tests.
 - Next: stretch items in PLAN.md (pre-vote/leases, learners, figure-8 scenario).
+
+## 2026-11-09 — Day 15: figure-8 scenario
+- Added `Bug::CommitOldTerm` (`--bug commit-old-term`): `advance_commit` skips the current-term check, so a leader commits older-term entries by counting replicas.
+- `tests/figure8.rs`: scripted single-node scenario (log [t1,t2], wins term 4, a peer acks index 2 only). Correct node leaves commit at 0 and commits 3 once the no-op is acked; the bugged node commits 2 prematurely.
+- Learned: sweeping 3000 seeds each at 3 and 5 nodes with the bug found nothing; a new leader's no-op means acks nearly always cover a current-term entry, so the window needs a specific message order. Scripted tests complement random sweeps here; it is therefore not in `corpus/seeds.txt`.
+- Next: pre-vote / leader leases, learners, CLI membership schedules.

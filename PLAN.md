@@ -22,4 +22,4 @@ Fourteen-day flagship arc. Every milestone has acceptance criteria that can be c
 ## Stretch
 - Pre-vote and leader leases (checker must catch stale lease reads under clock skew).
 - [x] Parallel sweep via per-thread simulators (each still single-threaded and deterministic) (Day 13).
-- Pre-vote and leader leases are the remaining stretch; also: non-voting learners for membership change, a CLI flag for membership schedules, a targeted scenario for the Raft figure-8 bug.
+- Pre-vote and leader leases are the remaining stretch; also: non-voting learners for membership change, a CLI flag for membership schedules, a targeted scenario for the Raft figure-8 bug (done, Day 15: `tests/figure8.rs`, `commit-old-term` bug).
