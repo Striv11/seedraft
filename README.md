@@ -108,6 +108,9 @@ A fourth candidate, committing old-term entries by replica count (Raft figure 8)
 - Disk records are framed with length + checksum; crash keeps a random prefix of unsynced bytes, so recovery must tolerate a torn tail (`Disk::repair`).
 - Partitions also drop messages already in flight, modelling a cable cut rather than a polite filter.
 
+### Pre-vote
+`RaftConfig::pre_vote` (CLI `--pre-vote`) makes a timed-out follower first ask peers whether they *would* vote for it (`PreVote`/`PreVoteReply`, no state change on the receiver), and only bump its term and campaign once a quorum agrees. Peers refuse while they have recently heard from a leader or have a newer log. An isolated node therefore stays at its old term instead of inflating it, and rejoining no longer deposes a healthy leader (`tests/prevote.rs` shows both behaviours, with a without-pre-vote control).
+
 ## Roadmap
 See [PLAN.md](PLAN.md) for the 14-day arc.
 - [x] Day 1: simulator core

@@ -50,6 +50,8 @@ pub struct RunConfig {
     pub snapshot_every: u64,
     /// Inject a known protocol bug (for validating the harness).
     pub bug: Option<Bug>,
+    /// Use pre-vote before campaigning.
+    pub pre_vote: bool,
 }
 
 impl Default for RunConfig {
@@ -67,6 +69,7 @@ impl Default for RunConfig {
             workload: Workload::default(),
             snapshot_every: 0,
             bug: None,
+            pre_vote: false,
         }
     }
 }
@@ -326,6 +329,7 @@ fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
         RaftConfig {
             snapshot_every: cfg.snapshot_every,
             bug: cfg.bug,
+            pre_vote: cfg.pre_vote,
             ..RaftConfig::default()
         },
     );

@@ -117,3 +117,9 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - `tests/figure8.rs`: scripted single-node scenario (log [t1,t2], wins term 4, a peer acks index 2 only). Correct node leaves commit at 0 and commits 3 once the no-op is acked; the bugged node commits 2 prematurely.
 - Learned: sweeping 3000 seeds each at 3 and 5 nodes with the bug found nothing; a new leader's no-op means acks nearly always cover a current-term entry, so the window needs a specific message order. Scripted tests complement random sweeps here; it is therefore not in `corpus/seeds.txt`.
 - Next: pre-vote / leader leases, learners, CLI membership schedules.
+
+## 2026-11-10 — Day 16: pre-vote
+- `RaftConfig::pre_vote` / `--pre-vote`: on election timeout a follower sends `PreVote` (term+1); peers answer without changing state, refusing if they are leader, heard a leader since their last timeout, or have a fresher log. A quorum of grants triggers the real campaign (`campaign()` refactored out of `on_timer`).
+- `tests/prevote.rs`: isolated follower keeps its term and the leader is undisturbed after heal (100 seeds); control without pre-vote inflates the term and does depose the leader in some seeds; election/re-election and a 150-seed full fault sweep pass. CLI `sweep --seeds 0..1000 --pre-vote`: 0 failed.
+- Learned: the "heard leader since last timer fire" flag is a tick-free stand-in for a leader-stickiness lease; fine for pre-vote, but real leader leases will need clock-based expiry.
+- Next: leader leases with a clock-skew fault (the checker must catch stale lease reads), learners, membership CLI schedules.

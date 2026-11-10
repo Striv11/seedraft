@@ -116,6 +116,19 @@ pub enum Msg {
         term: Term,
         granted: bool,
     },
+    /// Pre-vote probe for a campaign at `term` (the sender's term + 1). Changes no state on
+    /// the receiver.
+    PreVote {
+        term: Term,
+        last_index: Index,
+        last_term: Term,
+    },
+    /// `term` is the responder's current term; `proposed` echoes the probe.
+    PreVoteReply {
+        term: Term,
+        proposed: Term,
+        granted: bool,
+    },
     AppendEntries {
         term: Term,
         prev_index: Index,
@@ -159,6 +172,9 @@ pub struct RaftConfig {
     pub snapshot_every: u64,
     /// Deliberately broken behaviour, for checking that the harness catches real bugs.
     pub bug: Option<Bug>,
+    /// Run a pre-vote round before campaigning: a node only bumps its term once a quorum says
+    /// it would grant a vote. Stops partitioned or flapping nodes from inflating terms.
+    pub pre_vote: bool,
 }
 
 /// Known protocol bugs that can be switched on to validate the test harness itself.
@@ -205,6 +221,7 @@ impl Default for RaftConfig {
             heartbeat: 50,
             snapshot_every: 0,
             bug: None,
+            pre_vote: false,
         }
     }
 }
@@ -257,6 +274,14 @@ pub struct Node {
     pub id: NodeId,
     /// Injected bug (testing the harness only).
     pub bug: Option<Bug>,
+    /// Use the pre-vote protocol before campaigning.
+    pub pre_vote: bool,
+    /// Followers: a leader contacted us since our election timer last fired (so we refuse
+    /// pre-votes: the leader is alive as far as we know).
+    heard_leader: bool,
+    /// Pre-vote round in flight: peers that said they would vote for us.
+    prevotes: BTreeSet<NodeId>,
+    prevoting: bool,
     n: usize,
     term: Term,
     voted_for: Option<NodeId>,
@@ -327,6 +352,10 @@ impl Node {
         let mut node = Self {
             id,
             bug: None,
+            pre_vote: false,
+            heard_leader: false,
+            prevotes: BTreeSet::new(),
+            prevoting: false,
             n,
             term: rec.term,
             voted_for: rec.voted_for,
@@ -492,6 +521,7 @@ impl Node {
         if term > self.term {
             self.term = term;
             self.voted_for = None;
+            self.prevoting = false;
             if self.role != Role::Follower {
                 self.role = Role::Follower;
                 outs.push(self.arm(TimerKind::Election));
@@ -532,21 +562,49 @@ impl Node {
                     outs.push(s.arm(TimerKind::Election));
                     return;
                 }
-                s.role = Role::Candidate;
-                s.term += 1;
-                s.voted_for = Some(s.id);
-                s.votes = BTreeSet::from([s.id]);
-                outs.push(s.arm(TimerKind::Election));
-                let (last_index, last_term) = (s.last_index(), s.term_at(s.last_index()));
-                let rv = Msg::RequestVote {
-                    term: s.term,
-                    last_index,
-                    last_term,
-                };
-                s.broadcast(&rv, outs);
-                s.maybe_win(outs); // single-node cluster
+                s.heard_leader = false;
+                if s.pre_vote {
+                    s.prevoting = true;
+                    s.prevotes = BTreeSet::from([s.id]);
+                    outs.push(s.arm(TimerKind::Election));
+                    let (last_index, last_term) = (s.last_index(), s.term_at(s.last_index()));
+                    let pv = Msg::PreVote {
+                        term: s.term + 1,
+                        last_index,
+                        last_term,
+                    };
+                    s.broadcast(&pv, outs);
+                    s.maybe_campaign(outs); // single-node cluster
+                } else {
+                    s.campaign(outs);
+                }
             }
         })
+    }
+
+    /// Pre-vote won (quorum of would-be votes): start the real election.
+    fn maybe_campaign(&mut self, outs: &mut Vec<Out>) {
+        if self.prevoting && self.role == Role::Follower && self.conf.has_quorum(&self.prevotes) {
+            self.prevoting = false;
+            self.campaign(outs);
+        }
+    }
+
+    fn campaign(&mut self, outs: &mut Vec<Out>) {
+        self.prevoting = false;
+        self.role = Role::Candidate;
+        self.term += 1;
+        self.voted_for = Some(self.id);
+        self.votes = BTreeSet::from([self.id]);
+        outs.push(self.arm(TimerKind::Election));
+        let (last_index, last_term) = (self.last_index(), self.term_at(self.last_index()));
+        let rv = Msg::RequestVote {
+            term: self.term,
+            last_index,
+            last_term,
+        };
+        self.broadcast(&rv, outs);
+        self.maybe_win(outs); // single-node cluster
     }
 
     fn maybe_win(&mut self, outs: &mut Vec<Out>) {
@@ -730,6 +788,37 @@ impl Node {
                     },
                 ));
             }
+            Msg::PreVote { .. } if !s.conf.contains(from) => {}
+            Msg::PreVote {
+                term,
+                last_index,
+                last_term,
+            } => {
+                let mine = (s.term_at(s.last_index()), s.last_index());
+                let granted = term > s.term
+                    && (last_term, last_index) >= mine
+                    && s.role != Role::Leader
+                    && !s.heard_leader;
+                outs.push(Out::Send(
+                    from,
+                    Msg::PreVoteReply {
+                        term: s.term,
+                        proposed: term,
+                        granted,
+                    },
+                ));
+            }
+            Msg::PreVoteReply {
+                term,
+                proposed,
+                granted,
+            } => {
+                s.observe_term(term, outs);
+                if granted && s.prevoting && proposed == s.term + 1 && s.role == Role::Follower {
+                    s.prevotes.insert(from);
+                    s.maybe_campaign(outs);
+                }
+            }
             Msg::VoteReply { term, granted } => {
                 s.observe_term(term, outs);
                 if granted && term == s.term && s.role == Role::Candidate {
@@ -754,6 +843,8 @@ impl Node {
                     if s.role == Role::Candidate {
                         s.role = Role::Follower;
                     }
+                    s.prevoting = false;
+                    s.heard_leader = true;
                     if s.role == Role::Follower {
                         outs.push(s.arm(TimerKind::Election));
                     }
@@ -803,6 +894,8 @@ impl Node {
                     if s.role == Role::Candidate {
                         s.role = Role::Follower;
                     }
+                    s.prevoting = false;
+                    s.heard_leader = true;
                     if s.role == Role::Follower {
                         outs.push(s.arm(TimerKind::Election));
                     }
@@ -1011,6 +1104,7 @@ impl Cluster {
         for id in 0..n {
             let (mut node, outs) = Node::recovered_with(id, n, genesis, Recovered::default());
             node.bug = c.cfg.bug;
+            node.pre_vote = c.cfg.pre_vote;
             c.nodes.push(node);
             c.exec(id, outs);
         }
@@ -1223,6 +1317,7 @@ impl Cluster {
         self.applied[id] = rec.snap_index;
         let (mut node, outs) = Node::recovered_with(id, self.nodes.len(), self.genesis, rec);
         node.bug = self.cfg.bug;
+        node.pre_vote = self.cfg.pre_vote;
         self.nodes[id] = node;
         self.exec(id, outs);
     }

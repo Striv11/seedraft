@@ -7,8 +7,8 @@ use seedraft::shrink::shrink;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
-  seedraft run --seed N [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink] [--timeline]
-  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--shrink] [--jobs J]
+  seedraft run --seed N [--nodes K] [--snapshot-every N] [--bug NAME] [--pre-vote] [--shrink] [--timeline]
+  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--pre-vote] [--shrink] [--jobs J]
   seedraft corpus [FILE]     replay the seed corpus (default corpus/seeds.txt)
 bugs (injected on purpose, to check the harness catches them):
   double-vote, skip-log-recency, accept-stale-append, commit-old-term";
@@ -92,6 +92,7 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
     if let Some(b) = flag(args, "--bug") {
         cfg.bug = Some(Bug::parse(b).ok_or("unknown --bug")?);
     }
+    cfg.pre_vote = args.iter().any(|a| a == "--pre-vote");
     if cfg.bug.is_some() {
         // Broken protocols may panic on corrupt state; that is reported as a failure.
         std::panic::set_hook(Box::new(|_| {}));
