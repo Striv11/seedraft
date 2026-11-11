@@ -52,6 +52,11 @@ pub struct RunConfig {
     pub bug: Option<Bug>,
     /// Use pre-vote before campaigning.
     pub pre_vote: bool,
+    /// Leader lease length in ticks (0 = off). Gets are then served locally by lease holders.
+    pub lease: u64,
+    /// Give every node a clock running up to this many percent fast or slow (0 = perfect
+    /// clocks). Leases are only safe at 0 (or well below the lease margin).
+    pub clock_skew: i64,
 }
 
 impl Default for RunConfig {
@@ -70,8 +75,25 @@ impl Default for RunConfig {
             snapshot_every: 0,
             bug: None,
             pre_vote: false,
+            lease: 0,
+            clock_skew: 0,
         }
     }
+}
+
+/// Per-node clock rate errors for a seed, from their own RNG stream.
+pub fn clock_skews(seed: u64, cfg: &RunConfig) -> Vec<i64> {
+    let mut rng = Rng::new(seed ^ 0xc10c_c10c_c10c_c10c);
+    (0..cfg.nodes)
+        .map(|_| {
+            if cfg.clock_skew == 0 {
+                0
+            } else {
+                let m = cfg.clock_skew;
+                rng.range(0, 2 * m as u64) as i64 - m
+            }
+        })
+        .collect()
 }
 
 /// Generate a fault schedule. At most a minority of nodes is down at once, and all faults
@@ -330,9 +352,13 @@ fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
             snapshot_every: cfg.snapshot_every,
             bug: cfg.bug,
             pre_vote: cfg.pre_vote,
+            lease: cfg.lease,
             ..RaftConfig::default()
         },
     );
+    for (n, pct) in clock_skews(seed, cfg).into_iter().enumerate() {
+        h.cluster.set_clock_skew(n, pct);
+    }
     h.cluster.sim.set_trace_recording(false);
     for s in sched {
         h.run_until(s.at);

@@ -40,6 +40,7 @@ fn leader_with_old_entry_on_majority(bug: Option<Bug>) -> Node {
             term: 4,
             success: true,
             index: 2,
+            stamp: 0,
         },
     );
     n
@@ -60,6 +61,7 @@ fn old_term_entry_on_a_majority_is_not_committed() {
             term: 4,
             success: true,
             index: 3,
+            stamp: 0,
         },
     );
     assert_eq!(n.commit_index(), 3);

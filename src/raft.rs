@@ -135,6 +135,8 @@ pub enum Msg {
         prev_term: Term,
         entries: Vec<Entry>,
         leader_commit: Index,
+        /// Leader's local clock (+1) when sent; echoed back so the leader can date its lease.
+        stamp: u64,
     },
     /// `index` is the follower's last matching index on success, or its log length as a hint
     /// for backing up `next_index` on failure.
@@ -142,6 +144,8 @@ pub enum Msg {
         term: Term,
         success: bool,
         index: Index,
+        /// Echo of the `AppendEntries` stamp (0 when the reply answers a snapshot).
+        stamp: u64,
     },
     /// Leader -> far-behind follower: the state machine as of `last_index` (whole snapshot in
     /// one message; chunking is not modelled). Answered with an `AppendReply`.
@@ -175,6 +179,11 @@ pub struct RaftConfig {
     /// Run a pre-vote round before campaigning: a node only bumps its term once a quorum says
     /// it would grant a vote. Stops partitioned or flapping nodes from inflating terms.
     pub pre_vote: bool,
+    /// Leader lease length in local ticks (0 = leases off). A leader holding acks from a quorum
+    /// for messages sent within the last `lease` ticks may serve reads locally; followers
+    /// refuse to vote for anyone else for `lease` ticks after hearing from a leader. Safe
+    /// only while node clocks run at (nearly) the same rate.
+    pub lease: u64,
 }
 
 /// Known protocol bugs that can be switched on to validate the test harness itself.
@@ -222,6 +231,7 @@ impl Default for RaftConfig {
             snapshot_every: 0,
             bug: None,
             pre_vote: false,
+            lease: 0,
         }
     }
 }
@@ -276,6 +286,14 @@ pub struct Node {
     pub bug: Option<Bug>,
     /// Use the pre-vote protocol before campaigning.
     pub pre_vote: bool,
+    /// Lease length in local ticks (0 = off), see [`RaftConfig::lease`].
+    pub lease: u64,
+    /// This node's local clock, pushed in by the environment before each event.
+    clock: u64,
+    /// Follower: local time a leader of the current term last contacted us.
+    contact: Option<u64>,
+    /// Leader: latest own-clock stamp (+1) of an `AppendEntries` each peer acknowledged.
+    acked: Vec<u64>,
     /// Followers: a leader contacted us since our election timer last fired (so we refuse
     /// pre-votes: the leader is alive as far as we know).
     heard_leader: bool,
@@ -353,6 +371,10 @@ impl Node {
             id,
             bug: None,
             pre_vote: false,
+            lease: 0,
+            clock: 0,
+            contact: None,
+            acked: vec![0; n],
             heard_leader: false,
             prevotes: BTreeSet::new(),
             prevoting: false,
@@ -613,6 +635,7 @@ impl Node {
             let next = self.last_index() + 1;
             self.next = vec![next; self.n];
             self.matched = vec![0; self.n];
+            self.acked = vec![0; self.n];
             self.push_entry(Entry {
                 term: self.term,
                 cmd: None,
@@ -719,8 +742,66 @@ impl Node {
                 prev_term: self.term_at(prev_index),
                 entries,
                 leader_commit: self.commit,
+                stamp: self.clock + 1,
             },
         ));
+    }
+
+    /// Environment hook: tell the node what its local clock reads. Called before every event.
+    pub fn set_clock(&mut self, now: u64) {
+        self.clock = now;
+    }
+
+    /// After a restart the node has forgotten which leader it promised not to desert, so it
+    /// stays out of elections for a full lease.
+    pub fn hold_votes(&mut self) {
+        self.contact = Some(self.clock);
+    }
+
+    /// Local time until which this leader's lease holds (0 = none): the latest send time
+    /// acknowledged by a quorum (counting ourselves as acked "now"), plus the lease length.
+    pub fn lease_expiry(&self) -> u64 {
+        if self.lease == 0 || self.role != Role::Leader {
+            return 0;
+        }
+        let mut stamps: Vec<u64> = (0..self.n)
+            .filter(|&p| self.conf.contains(p))
+            .map(|p| {
+                if p == self.id {
+                    self.clock + 1
+                } else {
+                    self.acked[p]
+                }
+            })
+            .filter(|&t| t > 0)
+            .collect();
+        stamps.sort_unstable_by(|a, b| b.cmp(a));
+        for t in stamps {
+            let set: BTreeSet<NodeId> = (0..self.n)
+                .filter(|&p| self.conf.contains(p))
+                .filter(|&p| {
+                    (if p == self.id {
+                        self.clock + 1
+                    } else {
+                        self.acked[p]
+                    }) >= t
+                })
+                .collect();
+            if self.conf.has_quorum(&set) {
+                return t - 1 + self.lease;
+            }
+        }
+        0
+    }
+
+    /// May this node answer a read from its own state right now? It must be a leader whose
+    /// lease is unexpired and which has committed an entry of its own term (so its commit
+    /// index reflects everything committed before it took over).
+    pub fn lease_read(&self) -> bool {
+        self.role == Role::Leader
+            && self.commit > 0
+            && self.term_at(self.commit) == self.term
+            && self.clock < self.lease_expiry()
     }
 
     /// Leader: commit the highest index replicated on a majority *in the current term*
@@ -764,6 +845,9 @@ impl Node {
             // A node outside our configuration (e.g. removed but unaware) must not be able to
             // depose us by inflating terms: ignore it entirely.
             Msg::RequestVote { .. } if !s.conf.contains(from) => {}
+            // Lease: while we may have promised a live leader its lease, ignore campaigns
+            // without even adopting their term.
+            Msg::RequestVote { .. } if s.lease > 0 && s.contact.is_some_and(|c| s.clock < c + s.lease) => {}
             Msg::RequestVote {
                 term,
                 last_index,
@@ -832,12 +916,14 @@ impl Node {
                 prev_term,
                 entries,
                 leader_commit,
+                stamp,
             } => {
                 s.observe_term(term, outs);
                 let mut reply = Msg::AppendReply {
                     term: s.term,
                     success: false,
                     index: s.last_index(),
+                    stamp,
                 };
                 if term == s.term || (s.bug == Some(Bug::AcceptStaleAppend) && term < s.term) {
                     if s.role == Role::Candidate {
@@ -846,6 +932,7 @@ impl Node {
                     s.prevoting = false;
                     s.heard_leader = true;
                     if s.role == Role::Follower {
+                        s.contact = Some(s.clock);
                         outs.push(s.arm(TimerKind::Election));
                     }
                     // A prev_index inside our snapshot is committed, hence matches the leader's.
@@ -872,6 +959,7 @@ impl Node {
                             term: s.term,
                             success: true,
                             index: at,
+                            stamp,
                         };
                     }
                 }
@@ -889,6 +977,7 @@ impl Node {
                     term: s.term,
                     success: false,
                     index: s.last_index(),
+                    stamp: 0,
                 };
                 if term == s.term {
                     if s.role == Role::Candidate {
@@ -905,6 +994,7 @@ impl Node {
                             term: s.term,
                             success: true,
                             index: last_index,
+                            stamp: 0,
                         };
                     } else {
                         s.install_snapshot(last_index, last_term, conf, data.clone());
@@ -916,14 +1006,23 @@ impl Node {
                             term: s.term,
                             success: true,
                             index: last_index,
+                            stamp: 0,
                         };
                     }
                 }
                 outs.push(Out::Send(from, reply));
             }
-            Msg::AppendReply { term, success, index } => {
+            Msg::AppendReply {
+                term,
+                success,
+                index,
+                stamp,
+            } => {
                 s.observe_term(term, outs);
                 if term == s.term && s.role == Role::Leader {
+                    // Any same-term reply, even a log mismatch, proves the follower accepted
+                    // our leadership as of the stamped send time.
+                    s.acked[from] = s.acked[from].max(stamp);
                     if success {
                         s.matched[from] = s.matched[from].max(index);
                         s.next[from] = s.next[from].max(s.matched[from] + 1);
@@ -1075,6 +1174,8 @@ pub struct Cluster {
     /// For each pair `(lo, hi)` of nodes: `(rewrites of lo, rewrites of hi, n)` meaning their
     /// logs were already compared and found identical through index `n`.
     agreed: Vec<Vec<(u64, u64, Index)>>,
+    /// Per-node clock rate error in percent: node `i` reads `now * (100 + skew[i]) / 100`.
+    skew: Vec<i64>,
 }
 
 impl Cluster {
@@ -1100,11 +1201,13 @@ impl Cluster {
             applied: vec![0; n],
             snapshots_installed: 0,
             agreed: vec![vec![(0, 0, 0); n]; n],
+            skew: vec![0; n],
         };
         for id in 0..n {
             let (mut node, outs) = Node::recovered_with(id, n, genesis, Recovered::default());
             node.bug = c.cfg.bug;
             node.pre_vote = c.cfg.pre_vote;
+            node.lease = c.cfg.lease;
             c.nodes.push(node);
             c.exec(id, outs);
         }
@@ -1157,6 +1260,7 @@ impl Cluster {
     /// of the joint-configuration entry, or `None` if there is no leader or it refuses.
     pub fn change_membership(&mut self, members: &[NodeId]) -> Option<(NodeId, Index)> {
         let (leader, _) = self.current_leaders().into_iter().max_by_key(|&(_, t)| t)?;
+        self.sync_clock(leader);
         let (index, outs) = self.nodes[leader].change_membership(members)?;
         self.exec(leader, outs);
         self.check_node(leader, false);
@@ -1167,6 +1271,7 @@ impl Cluster {
     /// `(leader, index)`. `None` if no live leader exists.
     pub fn propose(&mut self, cmd: u64) -> Option<(NodeId, Index)> {
         let (leader, _) = self.current_leaders().into_iter().max_by_key(|&(_, t)| t)?;
+        self.sync_clock(leader);
         let (index, outs) = self.nodes[leader].propose(cmd)?;
         self.exec(leader, outs);
         self.check_node(leader, false);
@@ -1298,6 +1403,46 @@ impl Cluster {
         self.sim.crash(id);
     }
 
+    /// Make node `id`'s clock run `pct` percent fast (negative: slow). Leases assume this is
+    /// ~0; the lease checks exist to show what happens when it is not.
+    pub fn set_clock_skew(&mut self, id: NodeId, pct: i64) {
+        assert!(pct > -100, "a clock cannot run backwards");
+        self.skew[id] = pct;
+    }
+
+    /// What node `id`'s own clock reads at global virtual time `at`.
+    pub fn local_time(&self, id: NodeId, at: u64) -> u64 {
+        (u128::from(at) * (100 + self.skew[id]) as u128 / 100) as u64
+    }
+
+    /// Live nodes that believe they may serve a lease read at global time `at`.
+    pub fn lease_holders(&mut self, at: u64) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        for id in 0..self.nodes.len() {
+            if self.sim.is_up(id) {
+                let t = self.local_time(id, at);
+                self.nodes[id].set_clock(t);
+                if self.nodes[id].lease_read() {
+                    out.push(id);
+                }
+            }
+        }
+        out
+    }
+
+    /// The state-machine view a node serving a lease read exposes: every entry up to its own
+    /// commit index, applied in order.
+    pub fn read_view(&self, id: NodeId) -> KvStore {
+        let mut store = KvStore::new();
+        let upto = self.nodes[id].commit_index() as usize;
+        for e in self.committed.iter().take(upto) {
+            if let Some(r) = e.cmd.and_then(crate::kv::Request::decode) {
+                store.apply(r);
+            }
+        }
+        store
+    }
+
     /// Restart a node, rebuilding its state from whatever survived on disk.
     pub fn restart(&mut self, id: NodeId) {
         if self.sim.is_up(id) {
@@ -1318,6 +1463,9 @@ impl Cluster {
         let (mut node, outs) = Node::recovered_with(id, self.nodes.len(), self.genesis, rec);
         node.bug = self.cfg.bug;
         node.pre_vote = self.cfg.pre_vote;
+        node.lease = self.cfg.lease;
+        node.set_clock(self.local_time(id, self.sim.now()));
+        node.hold_votes();
         self.nodes[id] = node;
         self.exec(id, outs);
     }
@@ -1361,10 +1509,16 @@ impl Cluster {
     }
 
     /// Process one simulator event. Returns false once the queue is empty.
+    fn sync_clock(&mut self, id: NodeId) {
+        let t = self.local_time(id, self.sim.now());
+        self.nodes[id].set_clock(t);
+    }
+
     pub fn step(&mut self) -> bool {
         match self.sim.step() {
             None => false,
             Some(Event::Timer { node, id }) => {
+                self.sync_clock(node);
                 let before = self.nodes[node].role;
                 let outs = self.nodes[node].on_timer(id);
                 self.exec(node, outs);
@@ -1374,6 +1528,7 @@ impl Cluster {
                 true
             }
             Some(Event::Deliver { from, to, msg }) => {
+                self.sync_clock(to);
                 let before = self.nodes[to].role;
                 let outs = self.nodes[to].on_message(from, msg);
                 self.exec(to, outs);

@@ -304,6 +304,7 @@ pub struct KvHarness {
     clients: Vec<Client>,
     applied: usize,
     clock: u64,
+    lease_reads: u64,
 }
 
 impl KvHarness {
@@ -326,6 +327,7 @@ impl KvHarness {
             clients,
             applied: 0,
             clock: 0,
+            lease_reads: 0,
         }
     }
 
@@ -339,6 +341,11 @@ impl KvHarness {
             self.clock = next;
             self.poll(next);
         }
+    }
+
+    /// Reads answered locally by a lease-holding leader instead of through the log.
+    pub fn lease_reads(&self) -> u64 {
+        self.lease_reads
     }
 
     /// Requests still waiting for a reply.
@@ -381,6 +388,11 @@ impl KvHarness {
                 self.clients[c].next_seq += 1;
                 let req = Request { client: id, seq, op };
                 let hist = self.history.invoke(id, op, now);
+                if let Some(reply) = self.try_lease_read(req, now) {
+                    self.history.complete(hist, reply, now);
+                    self.lease_reads += 1;
+                    continue;
+                }
                 self.cluster.propose(req.encode());
                 self.clients[c].pending = Some(Pending {
                     req,
@@ -389,6 +401,20 @@ impl KvHarness {
                 });
             }
         }
+    }
+
+    /// Serve a Get from some node that believes it holds a lease (picked at random, so a
+    /// deposed leader with a stale lease gets its turn). `None`: go through the log.
+    fn try_lease_read(&mut self, req: Request, now: u64) -> Option<Reply> {
+        if !matches!(req.op, Op::Get { .. }) {
+            return None;
+        }
+        let holders = self.cluster.lease_holders(now);
+        if holders.is_empty() {
+            return None;
+        }
+        let pick = holders[self.cluster.sim.rng().range(0, holders.len() as u64 - 1) as usize];
+        self.cluster.read_view(pick).apply(req)
     }
 
     fn random_op(&mut self, _client: u8) -> Op {

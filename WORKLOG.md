@@ -123,3 +123,10 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - `tests/prevote.rs`: isolated follower keeps its term and the leader is undisturbed after heal (100 seeds); control without pre-vote inflates the term and does depose the leader in some seeds; election/re-election and a 150-seed full fault sweep pass. CLI `sweep --seeds 0..1000 --pre-vote`: 0 failed.
 - Learned: the "heard leader since last timer fire" flag is a tick-free stand-in for a leader-stickiness lease; fine for pre-vote, but real leader leases will need clock-based expiry.
 - Next: leader leases with a clock-skew fault (the checker must catch stale lease reads), learners, membership CLI schedules.
+
+## 2026-11-11 — Day 17: leader leases and clock skew
+- `RaftConfig::lease` / `--lease`: `AppendEntries` carries the leader's local send stamp, replies echo it, and `Node::lease_expiry` is the newest stamp a quorum acked plus the lease length. `lease_read()` also requires a committed entry from the leader's own term. Followers ignore `RequestVote` for a lease after hearing from a leader; restarted nodes hold votes for a full lease.
+- Nodes now have a pushed-in local clock (`set_clock`); `Cluster::set_clock_skew` / `--clock-skew PCT` gives each node a rate error from a dedicated seed stream. The KV harness serves `Get`s from a random lease holder (so deposed leaders get a turn) using that node's commit prefix, falling back to the log.
+- Result: 0 failures over 2000 seeds with perfect clocks and with a 20% skew; at lease 140 and 90% skew, stale reads are found (seed 34 first) and caught by the linearizability checker. The same seed passes with perfect clocks.
+- Learned: skews of 40-60% against a 100-tick lease (election timeout 150+) found nothing, since the lease only has to be shorter than the earliest possible election in the leader's own clock. A lease close to the election timeout plus large skew is what breaks it.
+- Next: non-voting learners, CLI membership schedules.
