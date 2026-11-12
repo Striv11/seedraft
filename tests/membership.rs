@@ -53,6 +53,7 @@ fn config_encoding_and_quorums() {
     let joint = Config {
         cur: 0b11100,
         prev: 0b00111,
+        learners: 0b1000000,
     };
     assert_eq!(Config::decode(joint.encode()), Some(joint));
     assert_eq!(Config::decode(7), None);

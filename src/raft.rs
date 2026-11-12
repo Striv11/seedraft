@@ -33,7 +33,13 @@ pub struct Entry {
 pub struct Config {
     pub cur: u32,
     pub prev: u32,
+    /// Non-voting learners: they receive the log but count toward no quorum and never campaign.
+    pub learners: u32,
 }
+
+/// Bits per member mask in an encoded config entry (so node ids must be < 18).
+const MASK_BITS: u32 = 18;
+const MASK: u64 = (1 << MASK_BITS) - 1;
 
 /// Config entries are log commands with this tag in the top byte (client id 0xFF is reserved).
 const CONF_TAG: u64 = 0xFF << 56;
@@ -43,7 +49,15 @@ impl Config {
         Self {
             cur: mask_of(members),
             prev: 0,
+            learners: 0,
         }
+    }
+    /// Does `id` receive log replication (voter or learner)?
+    pub fn replicates(&self, id: NodeId) -> bool {
+        (self.voters() | self.learners) >> id & 1 == 1
+    }
+    pub fn is_learner(&self, id: NodeId) -> bool {
+        self.learners >> id & 1 == 1
     }
     pub fn is_joint(&self) -> bool {
         self.prev != 0
@@ -87,13 +101,17 @@ impl Config {
         }
     }
     pub fn encode(&self) -> u64 {
-        CONF_TAG | u64::from(self.prev) << 24 | u64::from(self.cur)
+        CONF_TAG
+            | u64::from(self.learners) << (2 * MASK_BITS)
+            | u64::from(self.prev) << MASK_BITS
+            | u64::from(self.cur)
     }
     /// `Some` if `cmd` is a config entry.
     pub fn decode(cmd: u64) -> Option<Self> {
         (cmd >> 56 == 0xFF).then_some(Self {
-            cur: (cmd & 0xFF_FFFF) as u32,
-            prev: (cmd >> 24 & 0xFF_FFFF) as u32,
+            cur: (cmd & MASK) as u32,
+            prev: (cmd >> MASK_BITS & MASK) as u32,
+            learners: (cmd >> (2 * MASK_BITS) & MASK) as u32,
         })
     }
 }
@@ -527,7 +545,7 @@ impl Node {
     /// Every other node we exchange votes and log entries with.
     fn peers(&self) -> Vec<NodeId> {
         (0..self.n)
-            .filter(|&p| p != self.id && self.conf.contains(p))
+            .filter(|&p| p != self.id && self.conf.replicates(p))
             .collect()
     }
 
@@ -657,15 +675,60 @@ impl Node {
             || self.conf_index > self.commit
             || target == 0
             || target == self.conf.cur
-            || members.iter().any(|&m| m >= self.n)
+            || members.iter().any(|&m| m >= self.n.min(MASK_BITS as usize))
+        {
+            return None;
+        }
+        // A learner may only be promoted once it has caught up with the commit point, so the
+        // new voter set cannot stall the cluster waiting for a cold node.
+        if members
+            .iter()
+            .any(|&m| self.conf.is_learner(m) && self.matched[m] < self.commit)
         {
             return None;
         }
         let joint = Config {
             cur: target,
             prev: self.conf.cur,
+            learners: self.conf.learners & !target,
         };
         self.propose(joint.encode())
+    }
+
+    /// Leader: start replicating to `id` as a non-voting learner (single-step change; learners
+    /// affect no quorum, so no joint phase is needed). Same one-change-at-a-time rule.
+    pub fn add_learner(&mut self, id: NodeId) -> Option<(Index, Vec<Out>)> {
+        if !self.can_change_learners() || id >= self.n.min(MASK_BITS as usize) || self.conf.replicates(id) {
+            return None;
+        }
+        let conf = Config {
+            learners: self.conf.learners | 1 << id,
+            ..self.conf
+        };
+        let (idx, outs) = self.propose(conf.encode())?;
+        Some((idx, outs))
+    }
+
+    /// Leader: stop replicating to learner `id`.
+    pub fn remove_learner(&mut self, id: NodeId) -> Option<(Index, Vec<Out>)> {
+        if !self.can_change_learners() || !self.conf.is_learner(id) {
+            return None;
+        }
+        let conf = Config {
+            learners: self.conf.learners & !(1 << id),
+            ..self.conf
+        };
+        self.propose(conf.encode())
+    }
+
+    fn can_change_learners(&self) -> bool {
+        self.role == Role::Leader && !self.conf.is_joint() && self.conf_index <= self.commit
+    }
+
+    /// Leader: how far learner/peer `id` trails the commit point.
+    pub fn lag(&self, id: NodeId) -> Index {
+        self.commit
+            .saturating_sub(self.matched.get(id).copied().unwrap_or(0))
     }
 
     /// Leader: once the joint configuration is committed, append the final one; once a final
@@ -678,6 +741,7 @@ impl Node {
             let fin = Config {
                 cur: self.conf.cur,
                 prev: 0,
+                learners: self.conf.learners,
             };
             self.push_entry(Entry {
                 term: self.term,
@@ -1267,6 +1331,28 @@ impl Cluster {
         Some((leader, index))
     }
 
+    /// Ask the current leader to add `id` as a non-voting learner.
+    pub fn add_learner(&mut self, id: NodeId) -> Option<(NodeId, Index)> {
+        self.learner_op(|n| n.add_learner(id))
+    }
+
+    /// Ask the current leader to stop replicating to learner `id`.
+    pub fn remove_learner(&mut self, id: NodeId) -> Option<(NodeId, Index)> {
+        self.learner_op(|n| n.remove_learner(id))
+    }
+
+    fn learner_op(
+        &mut self,
+        f: impl FnOnce(&mut Node) -> Option<(Index, Vec<Out>)>,
+    ) -> Option<(NodeId, Index)> {
+        let (leader, _) = self.current_leaders().into_iter().max_by_key(|&(_, t)| t)?;
+        self.sync_clock(leader);
+        let (index, outs) = f(&mut self.nodes[leader])?;
+        self.exec(leader, outs);
+        self.check_node(leader, false);
+        Some((leader, index))
+    }
+
     /// Submit `cmd` to the current leader (highest term if several), returning
     /// `(leader, index)`. `None` if no live leader exists.
     pub fn propose(&mut self, cmd: u64) -> Option<(NodeId, Index)> {
@@ -1330,11 +1416,16 @@ impl Cluster {
                         if let Some(c) = e.cmd.and_then(Config::decode) {
                             // Committed configs must walk stable -> joint -> stable, each step
                             // anchored at the previous one, so no two disjoint majorities exist.
-                            let ok = if self.conf_chain.is_joint() {
-                                !c.is_joint() && c.cur == self.conf_chain.cur
-                            } else {
-                                c.is_joint() && c.prev == self.conf_chain.cur
-                            };
+                            // A learner-only change is a stable -> stable step with the same
+                            // voters. Learners and voters must never overlap.
+                            let prev = self.conf_chain;
+                            let ok = c.learners & c.voters() == 0
+                                && if prev.is_joint() {
+                                    !c.is_joint() && c.cur == prev.cur && c.learners == prev.learners
+                                } else {
+                                    (c.is_joint() && c.prev == prev.cur)
+                                        || (!c.is_joint() && c.cur == prev.cur)
+                                };
                             if !ok {
                                 found.push(format!(
                                     "t={now}: committed config {c:?} at {i} does not follow {:?}",

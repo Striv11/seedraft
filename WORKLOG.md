@@ -130,3 +130,10 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Result: 0 failures over 2000 seeds with perfect clocks and with a 20% skew; at lease 140 and 90% skew, stale reads are found (seed 34 first) and caught by the linearizability checker. The same seed passes with perfect clocks.
 - Learned: skews of 40-60% against a 100-tick lease (election timeout 150+) found nothing, since the lease only has to be shorter than the earliest possible election in the leader's own clock. A lease close to the election timeout plus large skew is what breaks it.
 - Next: non-voting learners, CLI membership schedules.
+
+## 2026-11-12 — Day 18: non-voting learners
+- `Config` gained a `learners` mask (three 18-bit masks in the config entry). Learners are replicated to (`replicates`, used by `peers`) but are outside `contains`/`has_quorum`/`quorum_match`, so they affect no commit, election or lease and never campaign. `Node::add_learner` / `remove_learner` are single-entry changes (no joint phase needed); `change_membership` carries surviving learners through and refuses to promote a learner whose `matched` is behind the commit index.
+- Harness: `Cluster::add_learner` / `remove_learner`; the committed-config chain check now accepts stable -> stable learner changes, requires joint -> final to keep the same learners, and that learners and voters are disjoint.
+- `tests/learners.rs`: encoding, catch-up without campaigning or term inflation (partitioned learner, 60 seeds), no commit with only learners alive (voter quorum needed), lagging promotion refused then succeeds, removal, and a 400-seed fault-mixed lifecycle test. Existing membership tests unchanged and green.
+- Learned: the 24-bit masks had to shrink to 18 bits to fit a third in the 56-bit command payload; fine for the 3..9 node limit.
+- Next: CLI flag for membership schedules (sweep with learner add/promote steps).
