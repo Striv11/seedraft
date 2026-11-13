@@ -24,6 +24,7 @@ fn schedule_keeps_a_majority_up_and_heals_everything() {
                 Fault::Restart(n) => assert!(down.remove(n), "seed {seed}: restart of up node"),
                 Fault::Partition(_) => part = true,
                 Fault::Heal => part = false,
+                _ => panic!("seed {seed}: membership fault without --membership"),
             }
             assert!(down.len() <= (cfg.nodes - 1) / 2, "seed {seed}: majority lost");
         }

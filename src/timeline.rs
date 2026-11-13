@@ -53,6 +53,18 @@ pub fn render(seed: u64, cfg: &RunConfig, sched: &[Scheduled], cols: usize) -> S
                     h.cluster.sim.heal();
                     'H'
                 }
+                Fault::AddLearner(n) => {
+                    h.cluster.add_learner(*n);
+                    'm'
+                }
+                Fault::RemoveLearner(n) => {
+                    h.cluster.remove_learner(*n);
+                    'm'
+                }
+                Fault::SetVoters(v) => {
+                    h.cluster.change_membership(v);
+                    'm'
+                }
             };
             mark = if mark == ' ' || mark == m { m } else { '*' };
             next += 1;

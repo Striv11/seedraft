@@ -132,6 +132,7 @@ fn compacted_nodes_match_uncompacted_replay_under_faults() {
                 Fault::Restart(n) => h.cluster.restart(*n),
                 Fault::Partition(g) => h.cluster.sim.partition(g),
                 Fault::Heal => h.cluster.sim.heal(),
+                _ => unreachable!("membership is off in this test"),
             }
         }
         h.quiesce();

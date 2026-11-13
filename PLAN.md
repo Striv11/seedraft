@@ -24,4 +24,5 @@ Fourteen-day flagship arc. Every milestone has acceptance criteria that can be c
 - [x] Leader leases (checker catches stale lease reads under clock skew; Day 17, `tests/lease.rs`).
 - [x] Parallel sweep via per-thread simulators (each still single-threaded and deterministic) (Day 13).
 - [x] Non-voting learners with catch-up-gated promotion (Day 18, `tests/learners.rs`).
-- Remaining stretch: a CLI flag for membership schedules, a targeted scenario for the Raft figure-8 bug (done, Day 15: `tests/figure8.rs`, `commit-old-term` bug).
+- [x] CLI `--membership` flag: membership changes inside fault schedules (Day 19, `tests/membership_sweep.rs`).
+- Done earlier: a targeted scenario for the Raft figure-8 bug (done, Day 15: `tests/figure8.rs`, `commit-old-term` bug).

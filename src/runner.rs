@@ -18,6 +18,12 @@ pub enum Fault {
     Restart(NodeId),
     Partition(Vec<Vec<NodeId>>),
     Heal,
+    /// Ask the current leader (if any) to make `n` a non-voting learner. Refused requests
+    /// (no leader, change in flight) are no-ops, so any subsequence of a schedule runs.
+    AddLearner(NodeId),
+    RemoveLearner(NodeId),
+    /// Ask the leader to change the voter set (joint consensus; promotes caught-up learners).
+    SetVoters(Vec<NodeId>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +39,9 @@ impl fmt::Display for Scheduled {
             Fault::Restart(n) => write!(f, "t={:<5} restart n{n}", self.at),
             Fault::Partition(g) => write!(f, "t={:<5} partition {g:?}", self.at),
             Fault::Heal => write!(f, "t={:<5} heal", self.at),
+            Fault::AddLearner(n) => write!(f, "t={:<5} add-learner n{n}", self.at),
+            Fault::RemoveLearner(n) => write!(f, "t={:<5} remove-learner n{n}", self.at),
+            Fault::SetVoters(v) => write!(f, "t={:<5} set-voters {v:?}", self.at),
         }
     }
 }
@@ -57,6 +66,8 @@ pub struct RunConfig {
     /// Give every node a clock running up to this many percent fast or slow (0 = perfect
     /// clocks). Leases are only safe at 0 (or well below the lease margin).
     pub clock_skew: i64,
+    /// Also schedule membership changes (learner add/remove/promote, voter set changes).
+    pub membership: bool,
 }
 
 impl Default for RunConfig {
@@ -77,6 +88,7 @@ impl Default for RunConfig {
             pre_vote: false,
             lease: 0,
             clock_skew: 0,
+            membership: false,
         }
     }
 }
@@ -94,6 +106,55 @@ pub fn clock_skews(seed: u64, cfg: &RunConfig) -> Vec<i64> {
             }
         })
         .collect()
+}
+
+/// Membership operations for a seed, from their own RNG stream. A model of the intended
+/// voter/learner sets keeps requests meaningful (the leader may still refuse them). Voters
+/// never drop below three. Everything is back to the full voter set by `fault_window`.
+fn membership_schedule(seed: u64, cfg: &RunConfig) -> Vec<Scheduled> {
+    let mut rng = Rng::new(seed ^ 0x3e3b_e75e_3e3b_e75e);
+    let mut voters: Vec<NodeId> = (0..cfg.nodes).collect();
+    let mut learners: Vec<NodeId> = Vec::new();
+    let mut out = Vec::new();
+    let mut t = rng.range(300, 700);
+    let end = cfg.fault_window.saturating_sub(600);
+    while t < end {
+        let outside: Vec<NodeId> = (0..cfg.nodes)
+            .filter(|n| !voters.contains(n) && !learners.contains(n))
+            .collect();
+        let fault = match rng.range(0, 3) {
+            0 if !outside.is_empty() => {
+                let n = outside[rng.range(0, outside.len() as u64 - 1) as usize];
+                learners.push(n);
+                Some(Fault::AddLearner(n))
+            }
+            1 if !learners.is_empty() => {
+                let n = learners.remove(rng.range(0, learners.len() as u64 - 1) as usize);
+                Some(Fault::RemoveLearner(n))
+            }
+            2 if !learners.is_empty() => {
+                let n = learners.remove(rng.range(0, learners.len() as u64 - 1) as usize);
+                voters.push(n);
+                voters.sort_unstable();
+                Some(Fault::SetVoters(voters.clone()))
+            }
+            3 if voters.len() > 3 => {
+                voters.remove(rng.range(0, voters.len() as u64 - 1) as usize);
+                Some(Fault::SetVoters(voters.clone()))
+            }
+            _ => None,
+        };
+        out.extend(fault.map(|fault| Scheduled { at: t, fault }));
+        t += rng.range(150, 450);
+    }
+    if voters.len() < cfg.nodes {
+        // Bring everyone back as voters so the settled cluster is the full one.
+        out.push(Scheduled {
+            at: end,
+            fault: Fault::SetVoters((0..cfg.nodes).collect()),
+        });
+    }
+    out
 }
 
 /// Generate a fault schedule. At most a minority of nodes is down at once, and all faults
@@ -148,6 +209,10 @@ pub fn schedule(seed: u64, cfg: &RunConfig) -> Vec<Scheduled> {
             _ => {}
         }
         t += rng.range(100, 400);
+    }
+    if cfg.membership {
+        out.extend(membership_schedule(seed, cfg));
+        out.sort_by_key(|s| s.at);
     }
     for n in down {
         out.push(Scheduled {
@@ -221,6 +286,8 @@ pub struct Coverage {
     /// Seeds that saw two or more leader terms (i.e. at least one re-election).
     pub reelections: u64,
     pub snapshots_installed: u64,
+    /// Learner/voter-set change requests scheduled.
+    pub membership_ops: u64,
     pub ops: u64,
     pub completed: u64,
 }
@@ -246,6 +313,9 @@ impl Coverage {
                     }
                 }
                 Fault::Heal => self.heals += 1,
+                Fault::AddLearner(_) | Fault::RemoveLearner(_) | Fault::SetVoters(_) => {
+                    self.membership_ops += 1
+                }
             }
         }
         if o.elections >= 2 {
@@ -265,6 +335,7 @@ impl Coverage {
         self.crash_during_partition += other.crash_during_partition;
         self.reelections += other.reelections;
         self.snapshots_installed += other.snapshots_installed;
+        self.membership_ops += other.membership_ops;
         self.ops += other.ops;
         self.completed += other.completed;
     }
@@ -367,6 +438,9 @@ fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
             Fault::Restart(n) => h.cluster.restart(*n),
             Fault::Partition(g) => h.cluster.sim.partition(g),
             Fault::Heal => h.cluster.sim.heal(),
+            Fault::AddLearner(n) => drop(h.cluster.add_learner(*n)),
+            Fault::RemoveLearner(n) => drop(h.cluster.remove_learner(*n)),
+            Fault::SetVoters(v) => drop(h.cluster.change_membership(v)),
         }
     }
     h.run_until(cfg.fault_window);

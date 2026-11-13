@@ -7,8 +7,8 @@ use seedraft::shrink::shrink;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
-  seedraft run --seed N [--nodes K] [--snapshot-every N] [--bug NAME] [--pre-vote] [--lease TICKS] [--clock-skew PCT] [--shrink] [--timeline]
-  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--pre-vote] [--lease TICKS] [--clock-skew PCT] [--shrink] [--jobs J]
+  seedraft run --seed N [--nodes K] [--snapshot-every N] [--bug NAME] [--pre-vote] [--membership] [--lease TICKS] [--clock-skew PCT] [--shrink] [--timeline]
+  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--pre-vote] [--membership] [--lease TICKS] [--clock-skew PCT] [--shrink] [--jobs J]
   seedraft corpus [FILE]     replay the seed corpus (default corpus/seeds.txt)
 bugs (injected on purpose, to check the harness catches them):
   double-vote, skip-log-recency, accept-stale-append, commit-old-term";
@@ -102,6 +102,7 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
         }
     }
     cfg.pre_vote = args.iter().any(|a| a == "--pre-vote");
+    cfg.membership = args.iter().any(|a| a == "--membership");
     if cfg.bug.is_some() {
         // Broken protocols may panic on corrupt state; that is reported as a failure.
         std::panic::set_hook(Box::new(|_| {}));
@@ -163,7 +164,7 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
                 failed.len()
             );
             println!(
-                "coverage: {} crashes, {} restarts, {} partitions, {} heals; {} seeds crashed during a partition, {} saw a re-election; {} snapshots installed; {}/{} ops completed",
+                "coverage: {} crashes, {} restarts, {} partitions, {} heals; {} seeds crashed during a partition, {} saw a re-election; {} snapshots installed; {} membership ops; {}/{} ops completed",
                 cov.crashes,
                 cov.restarts,
                 cov.partitions,
@@ -171,6 +172,7 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
                 cov.crash_during_partition,
                 cov.reelections,
                 cov.snapshots_installed,
+                cov.membership_ops,
                 cov.completed,
                 cov.ops
             );
