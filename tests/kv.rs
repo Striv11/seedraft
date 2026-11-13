@@ -41,10 +41,12 @@ fn encoding_round_trips() {
         },
     ];
     for (i, op) in ops.into_iter().enumerate() {
-        let r = req(255 - i as u8, 65535 - i as u16, op);
+        let r = req(254 - i as u8, 65535 - i as u16, op);
         assert_eq!(Request::decode(r.encode()), Some(r));
     }
     assert_eq!(Request::decode(3 << 38), None);
+    // Raft config entries share the command space and must never decode as client requests.
+    assert_eq!(Request::decode(0xFF << 56 | 1 << 38 | 5 << 32), None);
 }
 
 #[test]

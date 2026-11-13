@@ -61,8 +61,12 @@ impl Request {
             | b as u64
     }
 
-    /// Inverse of [`Request::encode`]; `None` for the unused kind value.
+    /// Inverse of [`Request::encode`]; `None` for the unused kind value and for Raft config
+    /// entries (top byte 0xFF, so client id 255 is reserved), which are not KV commands.
     pub fn decode(w: u64) -> Option<Self> {
+        if w >> 56 == 0xFF {
+            return None;
+        }
         let key = ((w >> 32) & 0x3f) as u8;
         let a = (w >> 16) as u16;
         let b = w as u16;
