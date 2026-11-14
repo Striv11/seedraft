@@ -144,3 +144,9 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - After the fix: 2000 seeds with `--membership` pass (6536 membership ops, 350k ops linearizable). `tests/membership_sweep.rs` checks determinism, ordering, voter floor and restoration, that at least half of the requests actually commit, and a 300-seed safe + linearizable sweep.
 - Learned: invariants on the Raft side being green says nothing about the layer above; end-to-end checking found what the unit-level membership tests could not.
 - Next: membership + leases/skew in one sweep, learner reads, or a docs pass on the CLI.
+
+## 2026-11-14 — Day 20: membership x leases x clock skew
+- Ran the combined sweep the Day 19 entry listed as next. `--membership --lease 140` (0..1000) and with `--clock-skew 10` both pass with 0 failures (3273 membership ops, ~195k ops linearizable); at `--clock-skew 90` 2 of 300 seeds fail, all as `NotLinearizable` (stale lease reads), none as Raft invariant violations.
+- Added two tests in `tests/membership_sweep.rs`: mild skew + leases + membership is safe and linearizable over 300 seeds; heavy skew is still caught (membership churn does not mask the bug) and only as a linearizability failure. README leader-lease section notes the composition.
+- Learned: no code changes were needed; the lease safety rule (vote-hold plus config-aware quorum acks) already composes with learners and joint configs.
+- Next: learner reads (serve stale-tolerant reads from learners), or a docs pass on CLI flags.

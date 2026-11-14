@@ -129,3 +129,37 @@ fn scheduled_changes_actually_commit() {
         "only {landed} of {scheduled} membership requests committed"
     );
 }
+
+#[test]
+fn membership_with_leases_and_mild_skew_is_safe_and_linearizable() {
+    let cfg = RunConfig {
+        membership: true,
+        lease: 140,
+        clock_skew: 10,
+        ..RunConfig::default()
+    };
+    let (cov, bad) = sweep(0, 300, &cfg, 2);
+    assert!(
+        bad.is_empty(),
+        "failures: {:?}",
+        bad.iter().map(|o| o.seed).collect::<Vec<_>>()
+    );
+    assert!(cov.membership_ops > 0);
+}
+
+#[test]
+fn membership_does_not_mask_lease_bugs_under_heavy_skew() {
+    // Membership churn must not hide stale lease reads: heavy skew is still caught, and
+    // only ever as a linearizability failure (never a Raft safety violation).
+    let cfg = RunConfig {
+        membership: true,
+        lease: 140,
+        clock_skew: 90,
+        ..RunConfig::default()
+    };
+    let (_, bad) = sweep(0, 300, &cfg, 2);
+    assert!(!bad.is_empty(), "heavy skew should produce stale reads");
+    assert!(bad
+        .iter()
+        .all(|o| matches!(o.failure, Some(seedraft::runner::Failure::NotLinearizable { .. }))));
+}
