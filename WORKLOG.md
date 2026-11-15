@@ -150,3 +150,9 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Added two tests in `tests/membership_sweep.rs`: mild skew + leases + membership is safe and linearizable over 300 seeds; heavy skew is still caught (membership churn does not mask the bug) and only as a linearizability failure. README leader-lease section notes the composition.
 - Learned: no code changes were needed; the lease safety rule (vote-hold plus config-aware quorum acks) already composes with learners and joint configs.
 - Next: learner reads (serve stale-tolerant reads from learners), or a docs pass on CLI flags.
+
+## 2026-11-15 — Day 21: CLI reference docs
+- Baseline `check.sh` was green; the plan was already complete, so I took the "docs pass on CLI flags" stretch item. The README only showed a handful of flags in the demo, while `--help` lists a dozen.
+- Added a "CLI reference" table to the README (every flag, which subcommand it applies to, what it does) and `tests/cli_docs.rs`, which runs the real binary with `--help` and asserts the set of flags equals the set documented in the README section, so the two cannot drift apart.
+- Learned: `CARGO_BIN_EXE_seedraft` lets an integration test exercise the actual CLI without extra dependencies.
+- Next: learner reads (serve stale-tolerant reads from learners).

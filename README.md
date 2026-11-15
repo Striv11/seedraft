@@ -87,6 +87,25 @@ coverage: 22794 crashes, 22794 restarts, 16473 partitions, 16473 heals; 7259 see
 
 `corpus/seeds.txt` lists seeds worth keeping: ones that expose each injected bug, and the same seeds on the real protocol. `seedraft corpus` replays them (a bugged line must fail, a `none` line must pass); a test does the same in `cargo test`.
 
+## CLI reference
+`seedraft --help` prints the same summary. Flags marked *both* apply to `run` and `sweep`.
+
+| Flag | Applies to | Meaning |
+|------|-----------|---------|
+| `--seed N` | run | The seed to replay (required). |
+| `--seeds A..B` | sweep | Half-open seed range (required). |
+| `--nodes K` | both | Cluster size, 3..=9. |
+| `--snapshot-every N` | both | Compact the log every N applied entries and use InstallSnapshot for laggards. |
+| `--bug NAME` | both | Inject a known bug (`double-vote`, `skip-log-recency`, `accept-stale-append`, `commit-old-term`) to check the harness catches it. |
+| `--pre-vote` | both | Enable pre-vote (see below). |
+| `--membership` | both | Mix learner and voter-set changes into fault schedules. |
+| `--lease TICKS` | both | Serve reads from a leader lease of this length. |
+| `--clock-skew PCT` | both | Per-node clock rate error, 0..=99 percent. |
+| `--shrink` | both | Delta-debug a failing schedule down to a minimal reproducer. |
+| `--timeline` | run | Render per-node lanes. |
+| `--jobs J` | sweep | Worker threads (default: all cores). |
+| `corpus [FILE]` | corpus | Replay the seed corpus (default `corpus/seeds.txt`). |
+
 ## Membership changes
 `Cluster::with_members(seed, n, &[0,1,2], ..)` starts a universe of `n` machines of which only some are voters; `Cluster::change_membership(&[..])` asks the leader to move to a new voter set through the joint configuration C(old,new), as in the Raft thesis: the joint entry takes effect as soon as it is appended, needs a majority of *both* sets, and once it commits the leader appends the final C(new) entry. Config entries are ordinary log commands (top byte `0xFF`, so KV client id 255 is reserved), snapshots carry the configuration, and nodes outside their configuration never campaign and have their `RequestVote`s ignored, so a removed node cannot depose the cluster. A leader removed by the change steps down once C(new) commits. The simulator checks that committed configs form a valid stable -> joint -> stable chain. 
 

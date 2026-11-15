@@ -26,4 +26,5 @@ Fourteen-day flagship arc. Every milestone has acceptance criteria that can be c
 - [x] Non-voting learners with catch-up-gated promotion (Day 18, `tests/learners.rs`).
 - [x] CLI `--membership` flag: membership changes inside fault schedules (Day 19, `tests/membership_sweep.rs`).
 - [x] Membership + leases + skew in one sweep (Day 20, `tests/membership_sweep.rs`).
+- [x] CLI reference in README, kept in sync with `--help` by a test (Day 21, `tests/cli_docs.rs`).
 - Done earlier: a targeted scenario for the Raft figure-8 bug (done, Day 15: `tests/figure8.rs`, `commit-old-term` bug).
