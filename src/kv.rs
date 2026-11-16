@@ -282,6 +282,10 @@ pub struct Workload {
     pub retry_after: u64,
     /// Virtual ticks between polls of the cluster.
     pub poll: u64,
+    /// With leases on, serve Gets from followers and learners too (ReadIndex-style): the lease
+    /// holder's commit index is the read index, and a node answers only once its own commit
+    /// index has reached it.
+    pub follower_reads: bool,
 }
 
 impl Default for Workload {
@@ -292,6 +296,7 @@ impl Default for Workload {
             start_pct: 30,
             retry_after: 120,
             poll: 5,
+            follower_reads: false,
         }
     }
 }
@@ -309,6 +314,7 @@ pub struct KvHarness {
     applied: usize,
     clock: u64,
     lease_reads: u64,
+    follower_reads: u64,
 }
 
 impl KvHarness {
@@ -332,6 +338,7 @@ impl KvHarness {
             applied: 0,
             clock: 0,
             lease_reads: 0,
+            follower_reads: 0,
         }
     }
 
@@ -350,6 +357,11 @@ impl KvHarness {
     /// Reads answered locally by a lease-holding leader instead of through the log.
     pub fn lease_reads(&self) -> u64 {
         self.lease_reads
+    }
+
+    /// Reads answered by a non-leader (follower or learner) that had caught up to the read index.
+    pub fn follower_reads(&self) -> u64 {
+        self.follower_reads
     }
 
     /// Requests still waiting for a reply.
@@ -418,6 +430,23 @@ impl KvHarness {
             return None;
         }
         let pick = holders[self.cluster.sim.rng().range(0, holders.len() as u64 - 1) as usize];
+        if self.wl.follower_reads {
+            // Read index = the lease holder's commit index. Any live node that has applied at
+            // least that far can answer; a node still behind sends the read through the log.
+            let read_index = self.cluster.node(pick).commit_index();
+            let n = self.cluster.nodes_len();
+            let first = self.cluster.sim.rng().range(0, n as u64 - 1) as usize;
+            for k in 0..n {
+                let id = (first + k) % n;
+                if id != pick
+                    && self.cluster.sim.is_up(id)
+                    && self.cluster.node(id).commit_index() >= read_index
+                {
+                    self.follower_reads += 1;
+                    return self.cluster.read_view(id).apply(req);
+                }
+            }
+        }
         self.cluster.read_view(pick).apply(req)
     }
 

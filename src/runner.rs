@@ -68,6 +68,8 @@ pub struct RunConfig {
     pub clock_skew: i64,
     /// Also schedule membership changes (learner add/remove/promote, voter set changes).
     pub membership: bool,
+    /// Serve leased Gets from followers/learners at the leader's read index.
+    pub follower_reads: bool,
 }
 
 impl Default for RunConfig {
@@ -89,6 +91,7 @@ impl Default for RunConfig {
             lease: 0,
             clock_skew: 0,
             membership: false,
+            follower_reads: false,
         }
     }
 }
@@ -418,7 +421,10 @@ fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
         seed,
         cfg.nodes,
         cfg.net.clone(),
-        cfg.workload,
+        Workload {
+            follower_reads: cfg.follower_reads,
+            ..cfg.workload
+        },
         RaftConfig {
             snapshot_every: cfg.snapshot_every,
             bug: cfg.bug,

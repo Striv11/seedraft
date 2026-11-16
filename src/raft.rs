@@ -1278,6 +1278,10 @@ impl Cluster {
         c
     }
 
+    pub fn nodes_len(&self) -> usize {
+        self.nodes.len()
+    }
+
     pub fn node(&self, id: NodeId) -> &Node {
         &self.nodes[id]
     }
