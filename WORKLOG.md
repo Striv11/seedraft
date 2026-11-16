@@ -156,3 +156,9 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Added a "CLI reference" table to the README (every flag, which subcommand it applies to, what it does) and `tests/cli_docs.rs`, which runs the real binary with `--help` and asserts the set of flags equals the set documented in the README section, so the two cannot drift apart.
 - Learned: `CARGO_BIN_EXE_seedraft` lets an integration test exercise the actual CLI without extra dependencies.
 - Next: learner reads (serve stale-tolerant reads from learners).
+
+## 2026-11-16 — Day 22: follower and learner reads
+- Added `--follower-reads` (`Workload::follower_reads`): with a lease, a Get takes the lease holder's commit index as the read index and is served by any live node (follower or learner) whose commit index has reached it, else by the leader. The checker validates it end to end.
+- Results: 1000 seeds with `--lease 140 --follower-reads` pass, as do 1000 with `--membership --clock-skew 10`; at `--clock-skew 90` 3 of 300 seeds fail, all stale reads. `tests/follower_reads.rs` covers a share of reads reaching non-leaders, flag-off behaviour, both sweeps and the skew failure mode. CLI reference and README updated.
+- Learned: roughly half of reads find a caught-up follower, since followers learn the commit index one heartbeat after the leader.
+- Next: a bench/stat of read-serving breakdown in the sweep coverage line, or a stale-tolerant "bounded staleness" read mode with its own checker rule.
