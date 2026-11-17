@@ -273,6 +273,10 @@ pub struct Outcome {
     /// Distinct terms that had a leader (a proxy for how much election churn the run saw).
     pub elections: usize,
     pub snapshots_installed: u64,
+    /// Gets served under a lease without going through the log (leader or follower).
+    pub lease_reads: u64,
+    /// The subset of `lease_reads` answered by a non-leader at the read index.
+    pub follower_reads: u64,
     pub failure: Option<Failure>,
 }
 
@@ -291,6 +295,9 @@ pub struct Coverage {
     pub snapshots_installed: u64,
     /// Learner/voter-set change requests scheduled.
     pub membership_ops: u64,
+    /// Gets served under a lease, and how many of those a follower/learner answered.
+    pub lease_reads: u64,
+    pub follower_reads: u64,
     pub ops: u64,
     pub completed: u64,
 }
@@ -325,6 +332,8 @@ impl Coverage {
             self.reelections += 1;
         }
         self.snapshots_installed += o.snapshots_installed;
+        self.lease_reads += o.lease_reads;
+        self.follower_reads += o.follower_reads;
         self.ops += o.ops as u64;
         self.completed += o.completed as u64;
     }
@@ -339,6 +348,8 @@ impl Coverage {
         self.reelections += other.reelections;
         self.snapshots_installed += other.snapshots_installed;
         self.membership_ops += other.membership_ops;
+        self.lease_reads += other.lease_reads;
+        self.follower_reads += other.follower_reads;
         self.ops += other.ops;
         self.completed += other.completed;
     }
@@ -411,6 +422,8 @@ pub fn run_schedule(seed: u64, cfg: &RunConfig, sched: Vec<Scheduled>) -> Outcom
             trace_hash: 0,
             elections: 0,
             snapshots_installed: 0,
+            lease_reads: 0,
+            follower_reads: 0,
             failure: Some(Failure::Panic(msg)),
         }
     })
@@ -472,6 +485,8 @@ fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
         trace_hash: h.cluster.sim.trace_hash(),
         elections: h.cluster.leaders_by_term().len(),
         snapshots_installed: h.cluster.snapshots_installed(),
+        lease_reads: h.lease_reads(),
+        follower_reads: h.follower_reads(),
         failure,
     }
 }

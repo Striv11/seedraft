@@ -83,7 +83,7 @@ Each seed gets a generated fault schedule (crashes keeping a majority up, partit
 coverage: 22794 crashes, 22794 restarts, 16473 partitions, 16473 heals; 7259 seeds crashed during a partition, 9587 saw a re-election; 0 snapshots installed; 1983195/1983195 ops completed
 ```
 
-`--snapshot-every 8` makes the snapshot count non-zero. Where the time went: the simulator rendered the whole trace to one `Debug` string to hash it (now hashed incrementally, and not stored during sweeps), and the log-matching invariant re-compared whole log prefixes on every step (now only the part not yet verified, reset whenever either log is truncated or replaced). Single-thread cost dropped from ~23 ms to ~5.4 ms per seed.
+With `--lease`, the sweep adds a line like `reads: 4120 served under a lease (2051 by followers/learners, 2069 by the lease holder), out of 38000 ops`; with `--follower-reads` the first number in the parentheses is non-zero. `--snapshot-every 8` makes the snapshot count non-zero. Where the time went: the simulator rendered the whole trace to one `Debug` string to hash it (now hashed incrementally, and not stored during sweeps), and the log-matching invariant re-compared whole log prefixes on every step (now only the part not yet verified, reset whenever either log is truncated or replaced). Single-thread cost dropped from ~23 ms to ~5.4 ms per seed.
 
 `corpus/seeds.txt` lists seeds worth keeping: ones that expose each injected bug, and the same seeds on the real protocol. `seedraft corpus` replays them (a bugged line must fail, a `none` line must pass); a test does the same in `cargo test`.
 

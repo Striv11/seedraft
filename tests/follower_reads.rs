@@ -80,3 +80,26 @@ fn heavy_skew_is_still_caught_as_a_stale_read() {
         .iter()
         .all(|o| matches!(o.failure, Some(Failure::NotLinearizable { .. }))));
 }
+
+#[test]
+fn sweep_reports_read_serving_breakdown() {
+    let (cov, bad) = sweep(0, 20, &cfg(0, false), 2);
+    assert!(bad.is_empty());
+    assert!(cov.follower_reads > 0 && cov.follower_reads <= cov.lease_reads);
+    assert!(cov.lease_reads < cov.ops);
+
+    let run = |extra: &[&str]| {
+        let o = std::process::Command::new(env!("CARGO_BIN_EXE_seedraft"))
+            .args(["sweep", "--seeds", "0..8", "--jobs", "2"])
+            .args(extra)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    let out = run(&["--lease", "140", "--follower-reads"]);
+    assert!(
+        out.contains("reads: ") && out.contains("by followers/learners"),
+        "{out}"
+    );
+    assert!(!run(&[]).contains("reads: "));
+}

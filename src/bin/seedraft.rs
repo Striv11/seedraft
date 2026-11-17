@@ -177,6 +177,15 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
                 cov.completed,
                 cov.ops
             );
+            if cov.lease_reads > 0 {
+                println!(
+                    "reads: {} served under a lease ({} by followers/learners, {} by the lease holder), out of {} ops",
+                    cov.lease_reads,
+                    cov.follower_reads,
+                    cov.lease_reads - cov.follower_reads,
+                    cov.ops
+                );
+            }
             eprintln!("{:.1}s on {jobs} thread(s)", started.elapsed().as_secs_f64());
             if let Some(s) = failed.first() {
                 println!("reproduce: seedraft run --seed {s}");

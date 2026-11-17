@@ -162,3 +162,8 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Results: 1000 seeds with `--lease 140 --follower-reads` pass, as do 1000 with `--membership --clock-skew 10`; at `--clock-skew 90` 3 of 300 seeds fail, all stale reads. `tests/follower_reads.rs` covers a share of reads reaching non-leaders, flag-off behaviour, both sweeps and the skew failure mode. CLI reference and README updated.
 - Learned: roughly half of reads find a caught-up follower, since followers learn the commit index one heartbeat after the leader.
 - Next: a bench/stat of read-serving breakdown in the sweep coverage line, or a stale-tolerant "bounded staleness" read mode with its own checker rule.
+
+## 2026-11-17 — Day 23: read-serving breakdown in sweep output
+- `Outcome` and `Coverage` now carry `lease_reads` and `follower_reads`; `sweep` prints a `reads:` line (only when leases are on) splitting lease reads into follower/learner vs lease-holder, relative to total ops. README updated; test checks the counters, CLI line, and its absence without `--lease`.
+- Learned: the harness already counted both numbers, so this was plumbing through the parallel merge.
+- Next: a bounded-staleness read mode with its own checker rule.
