@@ -7,8 +7,8 @@ use seedraft::shrink::shrink;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage:
-  seedraft run --seed N [--nodes K] [--snapshot-every N] [--bug NAME] [--pre-vote] [--membership] [--lease TICKS] [--follower-reads] [--clock-skew PCT] [--shrink] [--timeline]
-  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--pre-vote] [--membership] [--lease TICKS] [--follower-reads] [--clock-skew PCT] [--shrink] [--jobs J]
+  seedraft run --seed N [--nodes K] [--snapshot-every N] [--bug NAME] [--pre-vote] [--membership] [--lease TICKS] [--follower-reads] [--stale-reads BOUND] [--clock-skew PCT] [--shrink] [--timeline]
+  seedraft sweep --seeds A..B [--nodes K] [--snapshot-every N] [--bug NAME] [--pre-vote] [--membership] [--lease TICKS] [--follower-reads] [--stale-reads BOUND] [--clock-skew PCT] [--shrink] [--jobs J]
   seedraft corpus [FILE]     replay the seed corpus (default corpus/seeds.txt)
 bugs (injected on purpose, to check the harness catches them):
   double-vote, skip-log-recency, accept-stale-append, commit-old-term";
@@ -100,6 +100,9 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
         if !(0..100).contains(&cfg.clock_skew) {
             return Err("--clock-skew must be 0..=99".into());
         }
+    }
+    if let Some(n) = flag(args, "--stale-reads") {
+        cfg.stale_bound = n.parse().map_err(|_| "bad --stale-reads")?;
     }
     cfg.pre_vote = args.iter().any(|a| a == "--pre-vote");
     cfg.follower_reads = args.iter().any(|a| a == "--follower-reads");

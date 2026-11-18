@@ -286,6 +286,11 @@ pub struct Workload {
     /// holder's commit index is the read index, and a node answers only once its own commit
     /// index has reached it.
     pub follower_reads: bool,
+    /// Bounded-staleness reads (0 = off): about half of the Gets not served under a lease go
+    /// to a follower that heard from its leader within `stale_bound / 2` ticks and answer from
+    /// its local state. These are recorded apart from `history` (they are not linearizable
+    /// by design) and checked with [`crate::lin::check_bounded_staleness`].
+    pub stale_bound: u64,
 }
 
 impl Default for Workload {
@@ -297,6 +302,7 @@ impl Default for Workload {
             retry_after: 120,
             poll: 5,
             follower_reads: false,
+            stale_bound: 0,
         }
     }
 }
@@ -309,12 +315,15 @@ pub struct KvHarness {
     pub cluster: Cluster,
     pub store: KvStore,
     pub history: Recorder,
+    /// Bounded-staleness reads, kept out of `history`.
+    pub stale_history: Recorder,
     wl: Workload,
     clients: Vec<Client>,
     applied: usize,
     clock: u64,
     lease_reads: u64,
     follower_reads: u64,
+    stale_reads: u64,
 }
 
 impl KvHarness {
@@ -333,12 +342,14 @@ impl KvHarness {
             cluster: Cluster::new(seed, nodes, net, raft),
             store: KvStore::new(),
             history: Recorder::default(),
+            stale_history: Recorder::default(),
             wl,
             clients,
             applied: 0,
             clock: 0,
             lease_reads: 0,
             follower_reads: 0,
+            stale_reads: 0,
         }
     }
 
@@ -362,6 +373,11 @@ impl KvHarness {
     /// Reads answered by a non-leader (follower or learner) that had caught up to the read index.
     pub fn follower_reads(&self) -> u64 {
         self.follower_reads
+    }
+
+    /// Reads answered by a follower under the bounded-staleness rule.
+    pub fn stale_reads(&self) -> u64 {
+        self.stale_reads
     }
 
     /// Requests still waiting for a reply.
@@ -403,6 +419,12 @@ impl KvHarness {
                 let seq = self.clients[c].next_seq;
                 self.clients[c].next_seq += 1;
                 let req = Request { client: id, seq, op };
+                if let Some(reply) = self.try_stale_read(req, now) {
+                    let sid = self.stale_history.invoke(id, op, now);
+                    self.stale_history.complete(sid, reply, now);
+                    self.stale_reads += 1;
+                    continue;
+                }
                 let hist = self.history.invoke(id, op, now);
                 if let Some(reply) = self.try_lease_read(req, now) {
                     self.history.complete(hist, reply, now);
@@ -417,6 +439,23 @@ impl KvHarness {
                 });
             }
         }
+    }
+
+    /// Bounded-staleness read: a random recently-in-contact follower answers locally.
+    /// Consumes RNG only when the mode is on, so other runs keep their traces.
+    fn try_stale_read(&mut self, req: Request, now: u64) -> Option<Reply> {
+        if self.wl.stale_bound == 0 || !matches!(req.op, Op::Get { .. }) {
+            return None;
+        }
+        if !self.cluster.sim.rng().chance_pct(50) {
+            return None;
+        }
+        let fresh = self.cluster.fresh_followers(now, self.wl.stale_bound / 2);
+        if fresh.is_empty() {
+            return None;
+        }
+        let pick = fresh[self.cluster.sim.rng().range(0, fresh.len() as u64 - 1) as usize];
+        self.cluster.read_view(pick).apply(req)
     }
 
     /// Serve a Get from some node that believes it holds a lease (picked at random, so a

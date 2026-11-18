@@ -125,3 +125,68 @@ fn check_register(ops: &[&HistOp]) -> bool {
     };
     s.run(None)
 }
+
+/// A bounded-staleness read that returned a value which had certainly been overwritten for
+/// longer than the bound.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleViolation {
+    pub key: u8,
+    /// `HistOp::id` of the offending read in the stale-read recorder.
+    pub read: usize,
+}
+
+/// Check bounded-staleness reads against the linearizable `history`.
+///
+/// A stale `Get` invoked at `t` may return any value the register held at some instant in
+/// `[t - bound, t]`. Without knowing the linearization we apply a sound (never falsely
+/// accusing) necessary condition: some write of the returned value, invoked by `t`, must not
+/// be *certainly* overwritten before `t - bound`. A write `w` is certainly overwritten by a
+/// definite write `w2` when `w2` was invoked after `w` returned; `w2` is then in effect by the
+/// time it returns. The initial (absent) value counts as overwritten by any definite write.
+/// Definite writes are Puts and Cas ops that reported success; any Put, or Cas that did not
+/// report failure, can be the source of a value.
+pub fn check_bounded_staleness(
+    history: &[HistOp],
+    stale: &[HistOp],
+    bound: u64,
+) -> Result<(), StaleViolation> {
+    for r in stale {
+        let Some((t, Reply::Value(v))) = r.ret else {
+            continue;
+        };
+        let key = r.op.key();
+        let on_key: Vec<&HistOp> = history.iter().filter(|o| o.op.key() == key).collect();
+        let definite = |o: &HistOp| {
+            matches!(
+                (o.op, o.ret),
+                (Op::Put { .. }, Some(_)) | (Op::Cas { .. }, Some((_, Reply::Cas(true))))
+            )
+        };
+        // Has some definite write invoked after `after` landed before `t - bound`?
+        let overwritten = |after: Option<u64>| {
+            on_key.iter().any(|w2| {
+                definite(w2)
+                    && after.is_none_or(|a| w2.invoke > a)
+                    && w2.ret.is_some_and(|(rt, _)| rt + bound < t)
+            })
+        };
+        let live = match v {
+            None => !overwritten(None),
+            Some(val) => on_key.iter().any(|w| {
+                let writes_v = match (w.op, w.ret) {
+                    (_, Some((_, Reply::Cas(false)))) => false,
+                    (Op::Put { val: x, .. }, _) => x == val,
+                    (Op::Cas { new, .. }, _) => new == val,
+                    _ => false,
+                };
+                // A write still pending can never be certainly overwritten.
+                let done = Some(w.ret.map_or(u64::MAX, |(rt, _)| rt));
+                writes_v && w.invoke <= t && !overwritten(done)
+            }),
+        };
+        if !live {
+            return Err(StaleViolation { key, read: r.id });
+        }
+    }
+    Ok(())
+}

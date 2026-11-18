@@ -70,6 +70,9 @@ pub struct RunConfig {
     pub membership: bool,
     /// Serve leased Gets from followers/learners at the leader's read index.
     pub follower_reads: bool,
+    /// Bounded-staleness follower reads with this staleness bound in ticks (0 = off); checked
+    /// by [`lin::check_bounded_staleness`].
+    pub stale_bound: u64,
 }
 
 impl Default for RunConfig {
@@ -92,6 +95,7 @@ impl Default for RunConfig {
             clock_skew: 0,
             membership: false,
             follower_reads: false,
+            stale_bound: 0,
         }
     }
 }
@@ -239,6 +243,8 @@ pub enum Failure {
     Invariant(Vec<String>),
     /// History is not linearizable on `key`.
     NotLinearizable { key: u8, ops: Vec<usize> },
+    /// A bounded-staleness read returned a value overwritten for longer than the bound.
+    StaleRead { key: u8, read: usize, bound: u64 },
     /// The implementation panicked (corrupt state reached an assertion or bad index).
     Panic(String),
 }
@@ -255,6 +261,12 @@ impl fmt::Display for Failure {
                 Ok(())
             }
             Failure::Panic(m) => write!(f, "panic: {m}"),
+            Failure::StaleRead { key, read, bound } => {
+                write!(
+                    f,
+                    "stale read {read} on key {key} older than the {bound}-tick bound"
+                )
+            }
             Failure::NotLinearizable { key, ops } => {
                 write!(f, "history not linearizable on key {key} (ops {ops:?})")
             }
@@ -436,6 +448,7 @@ fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
         cfg.net.clone(),
         Workload {
             follower_reads: cfg.follower_reads,
+            stale_bound: cfg.stale_bound,
             ..cfg.workload
         },
         RaftConfig {
@@ -471,10 +484,21 @@ fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
     let failure = if !h.cluster.violations().is_empty() {
         Some(Failure::Invariant(h.cluster.violations().to_vec()))
     } else {
-        lin::check(ops).err().map(|v| Failure::NotLinearizable {
-            key: v.key,
-            ops: v.ops,
-        })
+        lin::check(ops)
+            .err()
+            .map(|v| Failure::NotLinearizable {
+                key: v.key,
+                ops: v.ops,
+            })
+            .or_else(|| {
+                lin::check_bounded_staleness(ops, h.stale_history.ops(), cfg.stale_bound)
+                    .err()
+                    .map(|v| Failure::StaleRead {
+                        key: v.key,
+                        read: v.read,
+                        bound: cfg.stale_bound,
+                    })
+            })
     };
     Outcome {
         seed,

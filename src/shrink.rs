@@ -14,6 +14,7 @@ fn class(f: &Failure) -> u8 {
         Failure::Invariant(_) => 0,
         Failure::NotLinearizable { .. } => 1,
         Failure::Panic(_) => 2,
+        Failure::StaleRead { .. } => 3,
     }
 }
 

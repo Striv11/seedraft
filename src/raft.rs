@@ -155,6 +155,9 @@ pub enum Msg {
         leader_commit: Index,
         /// Leader's local clock (+1) when sent; echoed back so the leader can date its lease.
         stamp: u64,
+        /// Ticks (leader's clock) since a quorum last acknowledged this leader; `u64::MAX`
+        /// if none yet. Lets followers bound how stale their state can be.
+        quorum_age: u64,
     },
     /// `index` is the follower's last matching index on success, or its log length as a hint
     /// for backing up `next_index` on failure.
@@ -310,6 +313,9 @@ pub struct Node {
     clock: u64,
     /// Follower: local time a leader of the current term last contacted us.
     contact: Option<u64>,
+    /// Follower: local time of the last `AppendEntries` from a leader of the current term
+    /// (with its term; unlike `contact`, never faked by `hold_votes`; used to bound read staleness).
+    leader_heard: Option<(Term, u64)>,
     /// Leader: latest own-clock stamp (+1) of an `AppendEntries` each peer acknowledged.
     acked: Vec<u64>,
     /// Followers: a leader contacted us since our election timer last fired (so we refuse
@@ -394,6 +400,7 @@ impl Node {
             contact: None,
             acked: vec![0; n],
             heard_leader: false,
+            leader_heard: None,
             prevotes: BTreeSet::new(),
             prevoting: false,
             n,
@@ -807,6 +814,7 @@ impl Node {
                 entries,
                 leader_commit: self.commit,
                 stamp: self.clock + 1,
+                quorum_age: self.quorum_age(),
             },
         ));
     }
@@ -814,6 +822,16 @@ impl Node {
     /// Environment hook: tell the node what its local clock reads. Called before every event.
     pub fn set_clock(&mut self, now: u64) {
         self.clock = now;
+    }
+
+    /// Whether this follower heard an `AppendEntries` from a leader within the last `window`
+    /// local ticks (call after `set_clock`). Its commit index is then at most about
+    /// `window` plus one replication round behind the cluster's.
+    pub fn heard_leader_within(&self, window: u64) -> bool {
+        self.role == Role::Follower
+            && self
+                .leader_heard
+                .is_some_and(|(term, t)| term == self.term && self.clock >= t && self.clock - t <= window)
     }
 
     /// After a restart the node has forgotten which leader it promised not to desert, so it
@@ -825,37 +843,52 @@ impl Node {
     /// Local time until which this leader's lease holds (0 = none): the latest send time
     /// acknowledged by a quorum (counting ourselves as acked "now"), plus the lease length.
     pub fn lease_expiry(&self) -> u64 {
-        if self.lease == 0 || self.role != Role::Leader {
+        if self.lease == 0 {
             return 0;
         }
+        match self.quorum_stamp() {
+            0 => 0,
+            t => t - 1 + self.lease,
+        }
+    }
+
+    /// Leader: the newest own-clock stamp (+1) that a quorum has acknowledged (counting
+    /// ourselves as acked "now"), or 0 if not a leader or no quorum has answered yet.
+    fn quorum_stamp(&self) -> u64 {
+        if self.role != Role::Leader {
+            return 0;
+        }
+        let stamp_of = |p: NodeId| {
+            if p == self.id {
+                self.clock + 1
+            } else {
+                self.acked[p]
+            }
+        };
         let mut stamps: Vec<u64> = (0..self.n)
             .filter(|&p| self.conf.contains(p))
-            .map(|p| {
-                if p == self.id {
-                    self.clock + 1
-                } else {
-                    self.acked[p]
-                }
-            })
+            .map(stamp_of)
             .filter(|&t| t > 0)
             .collect();
         stamps.sort_unstable_by(|a, b| b.cmp(a));
         for t in stamps {
             let set: BTreeSet<NodeId> = (0..self.n)
                 .filter(|&p| self.conf.contains(p))
-                .filter(|&p| {
-                    (if p == self.id {
-                        self.clock + 1
-                    } else {
-                        self.acked[p]
-                    }) >= t
-                })
+                .filter(|&p| stamp_of(p) >= t)
                 .collect();
             if self.conf.has_quorum(&set) {
-                return t - 1 + self.lease;
+                return t;
             }
         }
         0
+    }
+
+    /// Ticks since a quorum last acknowledged us, as sent in `AppendEntries`.
+    fn quorum_age(&self) -> u64 {
+        match self.quorum_stamp() {
+            0 => u64::MAX,
+            t => (self.clock + 1).saturating_sub(t),
+        }
     }
 
     /// May this node answer a read from its own state right now? It must be a leader whose
@@ -981,6 +1014,7 @@ impl Node {
                 entries,
                 leader_commit,
                 stamp,
+                quorum_age,
             } => {
                 s.observe_term(term, outs);
                 let mut reply = Msg::AppendReply {
@@ -1019,6 +1053,14 @@ impl Node {
                         }
                         // `at` is the last index this message vouches for.
                         s.commit = s.commit.max(leader_commit.min(at));
+                        // Fresh only if this message brought us up to the leader's commit
+                        // point, and only as of the leader's last quorum contact, so neither
+                        // a lagging follower nor one of a deposed leader cut off from the
+                        // majority vouches for its state.
+                        if term == s.term && s.role == Role::Follower && s.commit >= leader_commit {
+                            s.leader_heard = (quorum_age != u64::MAX)
+                                .then_some((s.term, s.clock.saturating_sub(quorum_age)));
+                        }
                         reply = Msg::AppendReply {
                             term: s.term,
                             success: true,
@@ -1518,6 +1560,22 @@ impl Cluster {
                 let t = self.local_time(id, at);
                 self.nodes[id].set_clock(t);
                 if self.nodes[id].lease_read() {
+                    out.push(id);
+                }
+            }
+        }
+        out
+    }
+
+    /// Live followers/learners that heard from a leader within `window` local ticks at
+    /// global time `at`: candidates for bounded-staleness reads.
+    pub fn fresh_followers(&mut self, at: u64, window: u64) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        for id in 0..self.nodes.len() {
+            if self.sim.is_up(id) {
+                let t = self.local_time(id, at);
+                self.nodes[id].set_clock(t);
+                if self.nodes[id].heard_leader_within(window) {
                     out.push(id);
                 }
             }
