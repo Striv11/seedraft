@@ -167,3 +167,8 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - `Outcome` and `Coverage` now carry `lease_reads` and `follower_reads`; `sweep` prints a `reads:` line (only when leases are on) splitting lease reads into follower/learner vs lease-holder, relative to total ops. README updated; test checks the counters, CLI line, and its absence without `--lease`.
 - Learned: the harness already counted both numbers, so this was plumbing through the parallel merge.
 - Next: a bounded-staleness read mode with its own checker rule.
+
+## 2026-11-18 — Day 24: bounded-staleness reads
+- `--stale-reads BOUND`: followers answer ~half of Gets locally when their last `AppendEntries` caught them up to the leader's commit point and carried a new `quorum_age` field (ticks since a quorum acked the leader). `lin::check_bounded_staleness` audits these reads (kept in `KvHarness::stale_history`) with a sound rule: some write of the returned value must not be certainly overwritten more than BOUND ticks earlier. New `Failure::StaleRead`; `lease_expiry` refactored onto `quorum_stamp`.
+- Learned: the checker caught my first rule being unsound (seed 2): a follower of a deposed, partitioned leader keeps hearing heartbeats. Also a follower that rejects an append (log behind) must not count as fresh. Bounds 20/80/600 now pass 400 seeds; existing golden hashes were unaffected.
+- Next: report stale-read counts in the sweep `reads:` line; a staleness-bound sweep combined with `--membership`.

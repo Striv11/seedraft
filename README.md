@@ -101,6 +101,7 @@ With `--lease`, the sweep adds a line like `reads: 4120 served under a lease (20
 | `--membership` | both | Mix learner and voter-set changes into fault schedules. |
 | `--lease TICKS` | both | Serve reads from a leader lease of this length. |
 | `--follower-reads` | both | With `--lease`, also serve Gets from followers and learners at the lease holder's read index. |
+| `--stale-reads BOUND` | both | Bounded-staleness reads: followers that heard from their leader within BOUND/2 ticks answer about half of the Gets locally; checked against the BOUND-tick staleness rule. |
 | `--clock-skew PCT` | both | Per-node clock rate error, 0..=99 percent. |
 | `--shrink` | both | Delta-debug a failing schedule down to a minimal reproducer. |
 | `--timeline` | run | Render per-node lanes. |
@@ -109,6 +110,8 @@ With `--lease`, the sweep adds a line like `reads: 4120 served under a lease (20
 
 ### Follower and learner reads
 With `--lease` plus `--follower-reads` a read takes the lease holder's commit index as its read index (as in Raft's ReadIndex) and is answered by any live node, follower or learner, whose own commit index has reached it; if none has, the leader answers. A lagging node therefore never serves a stale value, and the safety argument is the lease's. Under `--clock-skew 90` the checker still reports stale reads, never invariant failures (`tests/follower_reads.rs`).
+
+`--stale-reads BOUND` adds a cheaper, weaker read: about half of the Gets go to a follower that, within the last BOUND/2 ticks, received an `AppendEntries` that brought it up to its leader's commit point *and* said a quorum had acknowledged that leader within BOUND/2 ticks (the leader sends the age as a duration, so no clocks are compared). The follower answers from its local state; these reads are kept out of the linearizable history and checked by `lin::check_bounded_staleness`: the value returned must come from a write that was not certainly overwritten (by a write invoked after it returned) more than BOUND ticks before the read. The quorum-age part matters: a first version that only required recent contact with *a* leader failed within 400 seeds, because a follower of a deposed leader stuck on the minority side of a partition keeps hearing heartbeats while a new leader commits elsewhere. 400 seeds pass at BOUND 20, 80 and 600 (`tests/stale_reads.rs`).
 
 ## Membership changes
 `Cluster::with_members(seed, n, &[0,1,2], ..)` starts a universe of `n` machines of which only some are voters; `Cluster::change_membership(&[..])` asks the leader to move to a new voter set through the joint configuration C(old,new), as in the Raft thesis: the joint entry takes effect as soon as it is appended, needs a majority of *both* sets, and once it commits the leader appends the final C(new) entry. Config entries are ordinary log commands (top byte `0xFF`, so KV client id 255 is reserved), snapshots carry the configuration, and nodes outside their configuration never campaign and have their `RequestVote`s ignored, so a removed node cannot depose the cluster. A leader removed by the change steps down once C(new) commits. The simulator checks that committed configs form a valid stable -> joint -> stable chain. 

@@ -29,4 +29,5 @@ Fourteen-day flagship arc. Every milestone has acceptance criteria that can be c
 - [x] CLI reference in README, kept in sync with `--help` by a test (Day 21, `tests/cli_docs.rs`).
 - [x] Follower/learner reads at the lease holder's read index (Day 22, `tests/follower_reads.rs`).
 - [x] Read-serving breakdown (lease vs follower reads) in the sweep output (Day 23, `tests/follower_reads.rs`).
+- [x] Bounded-staleness follower reads with their own checker rule (Day 24, `tests/stale_reads.rs`).
 - Done earlier: a targeted scenario for the Raft figure-8 bug (done, Day 15: `tests/figure8.rs`, `commit-old-term` bug).
