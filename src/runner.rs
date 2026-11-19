@@ -289,6 +289,8 @@ pub struct Outcome {
     pub lease_reads: u64,
     /// The subset of `lease_reads` answered by a non-leader at the read index.
     pub follower_reads: u64,
+    /// Gets answered by a fresh follower under `--stale-reads` (audited separately).
+    pub stale_reads: u64,
     pub failure: Option<Failure>,
 }
 
@@ -310,6 +312,8 @@ pub struct Coverage {
     /// Gets served under a lease, and how many of those a follower/learner answered.
     pub lease_reads: u64,
     pub follower_reads: u64,
+    /// Bounded-staleness reads served by followers.
+    pub stale_reads: u64,
     pub ops: u64,
     pub completed: u64,
 }
@@ -346,6 +350,7 @@ impl Coverage {
         self.snapshots_installed += o.snapshots_installed;
         self.lease_reads += o.lease_reads;
         self.follower_reads += o.follower_reads;
+        self.stale_reads += o.stale_reads;
         self.ops += o.ops as u64;
         self.completed += o.completed as u64;
     }
@@ -362,6 +367,7 @@ impl Coverage {
         self.membership_ops += other.membership_ops;
         self.lease_reads += other.lease_reads;
         self.follower_reads += other.follower_reads;
+        self.stale_reads += other.stale_reads;
         self.ops += other.ops;
         self.completed += other.completed;
     }
@@ -436,6 +442,7 @@ pub fn run_schedule(seed: u64, cfg: &RunConfig, sched: Vec<Scheduled>) -> Outcom
             snapshots_installed: 0,
             lease_reads: 0,
             follower_reads: 0,
+            stale_reads: 0,
             failure: Some(Failure::Panic(msg)),
         }
     })
@@ -511,6 +518,7 @@ fn execute(seed: u64, cfg: &RunConfig, sched: &[Scheduled]) -> Outcome {
         snapshots_installed: h.cluster.snapshots_installed(),
         lease_reads: h.lease_reads(),
         follower_reads: h.follower_reads(),
+        stale_reads: h.stale_reads(),
         failure,
     }
 }

@@ -111,6 +111,8 @@ With `--lease`, the sweep adds a line like `reads: 4120 served under a lease (20
 ### Follower and learner reads
 With `--lease` plus `--follower-reads` a read takes the lease holder's commit index as its read index (as in Raft's ReadIndex) and is answered by any live node, follower or learner, whose own commit index has reached it; if none has, the leader answers. A lagging node therefore never serves a stale value, and the safety argument is the lease's. Under `--clock-skew 90` the checker still reports stale reads, never invariant failures (`tests/follower_reads.rs`).
 
+With `--stale-reads` the sweep's `reads:` line also reports `N bounded-staleness reads by followers`.
+
 `--stale-reads BOUND` adds a cheaper, weaker read: about half of the Gets go to a follower that, within the last BOUND/2 ticks, received an `AppendEntries` that brought it up to its leader's commit point *and* said a quorum had acknowledged that leader within BOUND/2 ticks (the leader sends the age as a duration, so no clocks are compared). The follower answers from its local state; these reads are kept out of the linearizable history and checked by `lin::check_bounded_staleness`: the value returned must come from a write that was not certainly overwritten (by a write invoked after it returned) more than BOUND ticks before the read. The quorum-age part matters: a first version that only required recent contact with *a* leader failed within 400 seeds, because a follower of a deposed leader stuck on the minority side of a partition keeps hearing heartbeats while a new leader commits elsewhere. 400 seeds pass at BOUND 20, 80 and 600 (`tests/stale_reads.rs`).
 
 ## Membership changes

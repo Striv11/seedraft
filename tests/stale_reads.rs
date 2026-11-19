@@ -147,3 +147,40 @@ fn failure_is_reported_as_stale_read() {
     );
     assert!(run_seed(1, &cfg(100)).ok());
 }
+
+#[test]
+fn sweep_reports_stale_read_counts() {
+    let cfg = RunConfig {
+        stale_bound: 80,
+        ..RunConfig::default()
+    };
+    let (cov, bad) = sweep(0, 20, &cfg, 2);
+    assert!(bad.is_empty());
+    assert!(cov.stale_reads > 0 && cov.stale_reads < cov.ops);
+    assert_eq!(cov.lease_reads, 0);
+
+    let run = |extra: &[&str]| {
+        let o = std::process::Command::new(env!("CARGO_BIN_EXE_seedraft"))
+            .args(["sweep", "--seeds", "0..8", "--jobs", "2"])
+            .args(extra)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    let out = run(&["--stale-reads", "80"]);
+    assert!(out.contains("bounded-staleness reads by followers"), "{out}");
+    assert!(!out.contains("served under a lease"), "{out}");
+    assert!(!run(&[]).contains("reads: "));
+}
+
+#[test]
+fn stale_reads_compose_with_membership() {
+    let cfg = RunConfig {
+        stale_bound: 80,
+        membership: true,
+        ..RunConfig::default()
+    };
+    let (cov, bad) = sweep(0, 300, &cfg, 2);
+    assert!(bad.is_empty(), "{:?}", bad.first().map(|o| (o.seed, &o.failure)));
+    assert!(cov.membership_ops > 0 && cov.stale_reads > 0);
+}

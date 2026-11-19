@@ -180,14 +180,23 @@ fn real_main(args: &[String]) -> Result<ExitCode, String> {
                 cov.completed,
                 cov.ops
             );
-            if cov.lease_reads > 0 {
-                println!(
-                    "reads: {} served under a lease ({} by followers/learners, {} by the lease holder), out of {} ops",
-                    cov.lease_reads,
-                    cov.follower_reads,
-                    cov.lease_reads - cov.follower_reads,
-                    cov.ops
-                );
+            if cov.lease_reads > 0 || cov.stale_reads > 0 {
+                let mut parts = Vec::new();
+                if cov.lease_reads > 0 {
+                    parts.push(format!(
+                        "{} served under a lease ({} by followers/learners, {} by the lease holder)",
+                        cov.lease_reads,
+                        cov.follower_reads,
+                        cov.lease_reads - cov.follower_reads
+                    ));
+                }
+                if cov.stale_reads > 0 {
+                    parts.push(format!(
+                        "{} bounded-staleness reads by followers",
+                        cov.stale_reads
+                    ));
+                }
+                println!("reads: {}, out of {} ops", parts.join("; "), cov.ops);
             }
             eprintln!("{:.1}s on {jobs} thread(s)", started.elapsed().as_secs_f64());
             if let Some(s) = failed.first() {
