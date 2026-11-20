@@ -177,3 +177,8 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - `Outcome`/`Coverage` carry `stale_reads`; the sweep `reads:` line now also appears for `--stale-reads` alone and reports `N bounded-staleness reads by followers` next to the lease breakdown. README updated. Tests: counters and CLI line (and no line without flags), plus 300 seeds of `--stale-reads 80 --membership` all passing with membership ops and stale reads actually exercised.
 - Learned: stale reads are counted separately from lease reads (they bypass the linearizable history), so the two numbers are independent. The full `check.sh` takes several minutes in debug, so run it in the background.
 - Next: stale reads together with `--lease`/clock skew; or a bench of how many reads each mode offloads from the leader.
+
+## 2026-11-20 — Day 26: stale reads x leases x skew
+- Two tests in `tests/stale_reads.rs`: 200 seeds of `--stale-reads 80 --lease 140 --follower-reads --membership --clock-skew 10` all pass with both read paths exercised; under 90% skew no run reports a `StaleRead` (staleness is measured in sim ticks, so node clock skew can only break lease reads, never the staleness audit).
+- Learned: the two read modes are independent enough that composing them needed no code change, only coverage.
+- Next: a bench of how many reads each mode offloads from the leader; or a README "read modes" overview table.

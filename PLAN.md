@@ -33,3 +33,4 @@ Fourteen-day flagship arc. Every milestone has acceptance criteria that can be c
 - [x] Stale-read counts in the sweep `reads:` line (Day 25, `tests/stale_reads.rs`).
 - [x] Sweep `--stale-reads` combined with `--membership`: 300 seeds pass (Day 25, `tests/stale_reads.rs`).
 - Done earlier: a targeted scenario for the Raft figure-8 bug (done, Day 15: `tests/figure8.rs`, `commit-old-term` bug).
+- [x] Stale reads combined with leases, follower reads, membership and clock skew (Day 26, `tests/stale_reads.rs`).

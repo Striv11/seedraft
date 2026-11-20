@@ -184,3 +184,42 @@ fn stale_reads_compose_with_membership() {
     assert!(bad.is_empty(), "{:?}", bad.first().map(|o| (o.seed, &o.failure)));
     assert!(cov.membership_ops > 0 && cov.stale_reads > 0);
 }
+
+#[test]
+fn stale_reads_compose_with_leases_follower_reads_and_mild_skew() {
+    let cfg = RunConfig {
+        stale_bound: 80,
+        lease: 140,
+        clock_skew: 10,
+        follower_reads: true,
+        membership: true,
+        ..RunConfig::default()
+    };
+    let (cov, bad) = sweep(0, 200, &cfg, 2);
+    assert!(bad.is_empty(), "{:?}", bad.first().map(|o| (o.seed, &o.failure)));
+    assert!(
+        cov.stale_reads > 0 && cov.lease_reads > 0,
+        "both read paths must be exercised"
+    );
+}
+
+#[test]
+fn stale_reads_under_heavy_skew_do_not_break_the_staleness_audit_or_hide_lease_bugs() {
+    // Staleness is measured in ticks of the global sim clock, so node clock skew must not
+    // produce false StaleRead failures; any failure under heavy skew must be a lease one.
+    let cfg = RunConfig {
+        stale_bound: 80,
+        lease: 140,
+        clock_skew: 90,
+        ..RunConfig::default()
+    };
+    let (_, bad) = sweep(0, 100, &cfg, 2);
+    for o in &bad {
+        assert!(
+            !matches!(o.failure, Some(Failure::StaleRead { .. })),
+            "seed {}: {:?}",
+            o.seed,
+            o.failure
+        );
+    }
+}
