@@ -223,3 +223,39 @@ fn stale_reads_under_heavy_skew_do_not_break_the_staleness_audit_or_hide_lease_b
         );
     }
 }
+
+/// Reads kept off the leader (answered by followers/learners) in each read mode.
+fn offloaded(cfg: &RunConfig) -> (u64, u64) {
+    let (cov, bad) = sweep(0, 100, cfg, 2);
+    assert!(bad.is_empty(), "{:?}", bad.first().map(|o| (o.seed, &o.failure)));
+    (cov.follower_reads + cov.stale_reads, cov.lease_reads)
+}
+
+#[test]
+fn read_modes_offload_progressively_more_reads_from_the_leader() {
+    let base = RunConfig::default();
+    let lease = RunConfig {
+        lease: 140,
+        ..base.clone()
+    };
+    let follower = RunConfig {
+        follower_reads: true,
+        ..lease.clone()
+    };
+    let stale = RunConfig {
+        stale_bound: 80,
+        ..base.clone()
+    };
+
+    assert_eq!(
+        offloaded(&base),
+        (0, 0),
+        "plain mode serves every read through the log"
+    );
+    let (off, leased) = offloaded(&lease);
+    assert!(off == 0 && leased > 0, "a lease alone keeps reads on the leader");
+    let (off_f, _) = offloaded(&follower);
+    assert!(off_f > 0, "follower reads move some leased reads off the leader");
+    let (off_s, _) = offloaded(&stale);
+    assert!(off_s > 0, "stale reads are served by followers");
+}

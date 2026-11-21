@@ -115,6 +115,19 @@ With `--stale-reads` the sweep's `reads:` line also reports `N bounded-staleness
 
 `--stale-reads BOUND` adds a cheaper, weaker read: about half of the Gets go to a follower that, within the last BOUND/2 ticks, received an `AppendEntries` that brought it up to its leader's commit point *and* said a quorum had acknowledged that leader within BOUND/2 ticks (the leader sends the age as a duration, so no clocks are compared). The follower answers from its local state; these reads are kept out of the linearizable history and checked by `lin::check_bounded_staleness`: the value returned must come from a write that was not certainly overwritten (by a write invoked after it returned) more than BOUND ticks before the read. The quorum-age part matters: a first version that only required recent contact with *a* leader failed within 400 seeds, because a follower of a deposed leader stuck on the minority side of a partition keeps hearing heartbeats while a new leader commits elsewhere. 400 seeds pass at BOUND 20, 80 and 600 (`tests/stale_reads.rs`).
 
+### Read modes at a glance
+Numbers from `seedraft sweep --seeds 0..300` (release, 0 failures in every row); "ops" are checked client operations, which grow when reads are cheaper.
+
+| Flags | Guarantee | Reads served locally | Offloaded from the leader |
+|-------|-----------|----------------------|---------------------------|
+| (none) | linearizable, every read through the log | 0 | 0 of 58948 ops |
+| `--lease 140` | linearizable, leader lease | 22040 by the lease holder | 0 |
+| `--lease 140 --follower-reads` | linearizable, ReadIndex at the lease holder | 21941 (lease) | 10089 by followers/learners |
+| `--stale-reads 80` | bounded staleness (80 ticks) | 9865 | 9865 by followers |
+| both of the above | mixed | 11515 lease + 10519 stale | 5224 + 10519 |
+
+`tests/stale_reads.rs` pins the ordering (none < lease < follower reads, stale reads non-zero).
+
 ## Membership changes
 `Cluster::with_members(seed, n, &[0,1,2], ..)` starts a universe of `n` machines of which only some are voters; `Cluster::change_membership(&[..])` asks the leader to move to a new voter set through the joint configuration C(old,new), as in the Raft thesis: the joint entry takes effect as soon as it is appended, needs a majority of *both* sets, and once it commits the leader appends the final C(new) entry. Config entries are ordinary log commands (top byte `0xFF`, so KV client id 255 is reserved), snapshots carry the configuration, and nodes outside their configuration never campaign and have their `RequestVote`s ignored, so a removed node cannot depose the cluster. A leader removed by the change steps down once C(new) commits. The simulator checks that committed configs form a valid stable -> joint -> stable chain. 
 

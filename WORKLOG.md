@@ -182,3 +182,8 @@ Newest entries at the bottom. Each entry records what actually changed, what was
 - Two tests in `tests/stale_reads.rs`: 200 seeds of `--stale-reads 80 --lease 140 --follower-reads --membership --clock-skew 10` all pass with both read paths exercised; under 90% skew no run reports a `StaleRead` (staleness is measured in sim ticks, so node clock skew can only break lease reads, never the staleness audit).
 - Learned: the two read modes are independent enough that composing them needed no code change, only coverage.
 - Next: a bench of how many reads each mode offloads from the leader; or a README "read modes" overview table.
+
+## 2026-11-21 — Day 27: read-modes overview
+- README gains a "Read modes at a glance" table with real sweep numbers (300 seeds per row); `tests/stale_reads.rs::read_modes_offload_progressively_more_reads_from_the_leader` pins the ordering: plain and lease-only reads offload nothing, follower reads and stale reads do.
+- Learned: cheaper reads also raise the op count per seed (58948 plain vs 67484 with leases), since clients wait less for answers.
+- Next: the plan and stretch list are complete; remaining ideas are a leader-load bench by wall-clock or a `--help` examples section.
